@@ -19,14 +19,13 @@ class Config:
     
     # SD默认参数
     SD_DEFAULT_PARAMS = {
-        'width': 512,
-        'height': 512,
+        'width': 1024,
+        'height': 1024,
         'steps': 20,
         'cfg_scale': 7.0,
-        'sampler_name': 'DPM++ 2M Karras',
+        'sampler_name': 'Euler a',
         'negative_prompt': 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry'
     }
     
     # 图片保存设置
-    SAVE_IMAGES_LOCALLY = os.getenv('SAVE_IMAGES_LOCALLY', 'true').lower() == 'true'
     LOCAL_SAVE_PATH = os.getenv('LOCAL_SAVE_PATH', 'generated_images')

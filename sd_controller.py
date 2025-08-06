@@ -6,11 +6,14 @@ import os
 from datetime import datetime
 from PIL import Image
 from config import Config
+from PIL.PngImagePlugin import PngInfo
+import json
 
 class StableDiffusionController:
     def __init__(self):
         self.api_url = Config.SD_API_URL
         self.timeout = Config.SD_API_TIMEOUT
+        self.last_result = None
     
     async def check_api_status(self):
         """检查SD WebUI API是否可用"""
@@ -40,6 +43,26 @@ class StableDiffusionController:
                     return []
         except Exception as e:
             return []
+    
+    async def get_current_model(self):
+        """获取当前使用的模型"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.api_url}/sdapi/v1/options", timeout=10) as response:
+                    if response.status == 200:
+                        options = await response.json()
+                        current_model = options.get('sd_model_checkpoint', '未知')
+                        # 如果是完整路径，只返回文件名
+                        if '\\' in current_model or '/' in current_model:
+                            current_model = current_model.split('\\')[-1].split('/')[-1]
+                        # 移除文件扩展名
+                        if current_model.endswith('.safetensors') or current_model.endswith('.ckpt'):
+                            current_model = current_model.rsplit('.', 1)[0]
+                        return current_model
+                    return "获取失败"
+        except Exception as e:
+            print(f"获取当前模型失败: {e}")
+            return "未知"
     
     async def get_samplers(self):
         """获取可用采样器列表"""
@@ -84,26 +107,28 @@ class StableDiffusionController:
                             image.save(img_bytes, format='PNG')
                             img_bytes.seek(0)
                             
-                            # 可选：保存到本地
-                            local_path = None
-                            if Config.SAVE_IMAGES_LOCALLY:
-                                local_path = await self.save_image_locally(image, prompt)
+                            # 可选：保存到本地（SD WebUI 格式）
+                            self.last_result = result
                             
-                            return True, img_bytes, result.get('info', {}), local_path
+                            return True, img_bytes
                         else:
-                            return False, "未生成图片", None, None
+                            return False, "未生成图片"
                     else:
                         error_text = await response.text()
-                        return False, f"API错误 ({response.status}): {error_text}", None, None
+                        return False, f"API错误 ({response.status}): {error_text}"
                         
         except asyncio.TimeoutError:
-            return False, "生成超时，请检查提示词复杂度", None, None
+            return False, "生成超时，请检查提示词复杂度"
         except Exception as e:
-            return False, f"生成失败: {str(e)}", None, None
+            return False, f"生成失败: {str(e)}"
     
-    async def save_image_locally(self, image, prompt):
-        """保存图片到本地"""
+    async def save_last_result_locally(self):
+        """保存图片到本地，使用 SD WebUI 标准格式"""
         try:
+            api_info = self.last_result.get('info', None)
+            image_data = base64.b64decode(self.last_result['images'][0])  # 修正这里
+            image = Image.open(io.BytesIO(image_data))
+
             # 创建保存目录
             save_dir = Config.LOCAL_SAVE_PATH
             if not os.path.exists(save_dir):
@@ -112,14 +137,22 @@ class StableDiffusionController:
             # 生成文件名
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             # 清理提示词作为文件名的一部分
-            safe_prompt = "".join(c for c in prompt[:30] if c.isalnum() or c in (' ', '-', '_')).strip()
-            safe_prompt = safe_prompt.replace(' ', '_')
-            filename = f"{timestamp}_{safe_prompt}.png"
-            
-            # 保存图片
+            filename = f"{timestamp}.png"
             filepath = os.path.join(save_dir, filename)
-            image.save(filepath, 'PNG')
             
+            # 创建 PNG 元数据
+            metadata = PngInfo()
+            
+            # SD WebUI 直接返回的格式就是标准格式，直接使用
+            if api_info and isinstance(api_info, str) and api_info.strip():
+                parameters_text = json.loads(api_info).get('infotexts', [''])[0]
+                # 保存到 PNG 的 "parameters" 字段
+                metadata.add_text("parameters", parameters_text)
+
+            # 保存图片
+            image.save(filepath, 'PNG', pnginfo=metadata)
+            
+            print(f"图片已保存: {filepath}")
             return filepath
             
         except Exception as e:
