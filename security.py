@@ -32,6 +32,24 @@ class SecurityManager:
         
         return True, "安全"
     
+    def check_generation_limit(self, user_id, limit=3, window=300):
+        return True, "通过"
+        # """检查用户生图频率限制 (5分钟内最多3张)"""
+        # now = time.time()
+        # if user_id not in self.rate_limits:
+        #     self.rate_limits[user_id] = []
+        
+        # # 清理过期记录
+        # self.rate_limits[user_id] = [
+        #     timestamp for timestamp in self.rate_limits[user_id]
+        #     if now - timestamp < window
+        # ]
+        
+        # if len(self.rate_limits[user_id]) >= limit:
+        #     return False, f"生图频率过高，请等待{window//60}分钟"
+        
+        # return True, "通过"
+    
     def add_generation_record(self, user_id):
         """添加生图记录"""
         now = time.time()

@@ -95,7 +95,6 @@ class TelegramBot:
         welcome_text = (
             f"🎯 Stable Diffusion 远程控制\n"
             f"👤 用户: {user.first_name}\n"
-            f"🆔 ID: {user.id}\n"
             f"🖥️ SD WebUI: {status_text}\n\n"
             f"请选择要执行的操作:"
         )
@@ -308,6 +307,7 @@ class TelegramBot:
     @require_auth
     async def handle_text_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理文本提示词"""
+    
         prompt = update.message.text.strip()
         user_id = update.effective_user.id
         username = update.effective_user.username or update.effective_user.first_name
@@ -316,19 +316,14 @@ class TelegramBot:
         last_msg_id = self.user_last_photo_msg.get(user_id)
         if last_msg_id:
             try:
-                print(f"清理旧消息按钮: chat_id={update.message.chat_id}, message_id={last_msg_id}")
                 await context.bot.edit_message_reply_markup(
                     chat_id=update.message.chat_id,
                     message_id=last_msg_id,
                     reply_markup=None
                 )
-            except BadRequest as e:
-                # 忽略“Message is not modified”异常
-                if "Message is not modified" not in str(e):
-                    print(f"清理旧消息按钮失败: {e}")
-            except Exception as e:
-                print(f"清理旧消息按钮失败: {e}")
-  
+            except Exception:
+                pass  # 忽略可能的错误
+
         if prompt.startswith('/'):
             return  # 忽略命令
         
@@ -336,6 +331,13 @@ class TelegramBot:
         safe, safety_msg = self.security.is_safe_prompt(prompt)
         if not safe:
             await update.message.reply_text(f"❌ 提示词不安全: {safety_msg}")
+            return
+        
+        limit, limit_msg = self.security.check_generation_limit(user_id)
+        if not limit:
+            await update.message.reply_text(
+                limit_msg + "\n\n"
+            )
             return
         
         # 队列限制检查
