@@ -25,4 +25,7 @@ build/
 # 图片生成目录
 generated_images/
 
+# 用户设置
+user_settings.json
+
 # 系统

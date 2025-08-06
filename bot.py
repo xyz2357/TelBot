@@ -36,6 +36,7 @@ class TelegramBot:
         self.application = None
         self.last_prompt = None
         self.user_last_photo_msg = {}
+        self.waiting_for_negative_prompt = set()  # 新增：跟踪等待输入负面词的用户
 
     # 下面的代码只做流程分发，具体逻辑交给 manager/controller
     def create_main_menu(self) -> InlineKeyboardMarkup:
@@ -130,6 +131,18 @@ class TelegramBot:
             # interrupt_{task_id}
             task_id = data.split("_", 1)[1]
             await self.interrupt_generation(query, task_id)
+        elif data == CallbackData.NEGATIVE_PROMPT_SETTINGS.value:
+            # negative_prompt_settings
+            await self.show_negative_prompt_settings(query, user_id)
+        elif data == CallbackData.SET_NEGATIVE_PROMPT.value:
+            # set_negative_prompt
+            await self.request_negative_prompt_input(query, user_id)
+        elif data == CallbackData.RESET_NEGATIVE_PROMPT.value:
+            # reset_negative_prompt
+            await self.reset_negative_prompt(query, user_id)
+        elif data == CallbackData.CANCEL_NEGATIVE_PROMPT.value:
+            # cancel_negative_prompt - 新增的取消功能
+            await self.cancel_negative_prompt_input(query, user_id)
 
     async def show_resolution_settings(self, query: CallbackQuery, user_id: str) -> None:
         """显示分辨率设置菜单"""
@@ -203,7 +216,7 @@ class TelegramBot:
             negative_prompt=user_settings['negative_prompt'][:100] + "..."
         )
         
-        keyboard = Keyboards.main_menu()
+        keyboard = Keyboards.sd_setting_menu()
         await query.edit_message_text(
             settings_text,
             reply_markup=keyboard
@@ -231,15 +244,106 @@ class TelegramBot:
             reply_markup=keyboard
         )
     
+    async def show_negative_prompt_settings(self, query: CallbackQuery, user_id: str) -> None:
+        """显示负面词设置菜单"""
+        user_settings = self.get_user_settings(user_id)
+        current_negative_prompt = user_settings['negative_prompt']
+        
+        # 截断显示长负面词
+        display_negative_prompt = current_negative_prompt
+        if len(display_negative_prompt) > 200:
+            display_negative_prompt = display_negative_prompt[:200] + "..."
+        
+        text = TextContent.NEGATIVE_PROMPT_SETTINGS.format(
+            negative_prompt=display_negative_prompt
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=Keyboards.negative_prompt_menu()
+        )
+
+    async def request_negative_prompt_input(self, query: CallbackQuery, user_id: str) -> None:
+        """请求用户输入自定义负面词"""
+        self.waiting_for_negative_prompt.add(user_id)
+        await query.edit_message_text(
+            TextContent.INPUT_NEGATIVE_PROMPT,
+            reply_markup=Keyboards.negative_prompt_input_menu()  # 使用带取消按钮的键盘
+        )
+
+    async def reset_negative_prompt(self, query: CallbackQuery, user_id: str) -> None:
+        """重置用户负面词为默认值"""
+        self.user_manager.reset_negative_prompt(user_id)
+        default_negative_prompt = Config.SD_DEFAULT_PARAMS['negative_prompt']
+        
+        # 截断显示
+        display_negative_prompt = default_negative_prompt
+        if len(display_negative_prompt) > 200:
+            display_negative_prompt = display_negative_prompt[:200] + "..."
+            
+        await query.edit_message_text(
+            TextContent.NEGATIVE_PROMPT_RESET.format(
+                negative_prompt=display_negative_prompt
+            ),
+            reply_markup=Keyboards.negative_prompt_menu()
+        )
+
+    async def handle_negative_prompt_input(self, update: Update, user_id: str, negative_prompt: str) -> None:
+        """处理用户输入的负面词"""
+        self.waiting_for_negative_prompt.discard(user_id)  # 移除等待状态
+        
+        # 验证负面词长度
+        if len(negative_prompt) > 1000:
+            await update.message.reply_text(TextContent.NEGATIVE_PROMPT_TOO_LONG)
+            return
+        
+        # 保存负面词
+        self.user_manager.set_negative_prompt(user_id, negative_prompt)
+        
+        # 截断显示
+        display_negative_prompt = negative_prompt
+        if len(display_negative_prompt) > 200:
+            display_negative_prompt = display_negative_prompt[:200] + "..."
+        
+        await update.message.reply_text(
+            TextContent.NEGATIVE_PROMPT_SET.format(negative_prompt=display_negative_prompt),
+            reply_markup=Keyboards.negative_prompt_menu()
+        )
+
+    async def cancel_negative_prompt_input(self, query: CallbackQuery, user_id: str) -> None:
+        """取消负面词输入"""
+        self.waiting_for_negative_prompt.discard(user_id)  # 移除等待状态
+        
+        # 获取当前负面词设置并显示设置页面
+        user_settings = self.get_user_settings(user_id)
+        current_negative_prompt = user_settings['negative_prompt']
+        
+        # 截断显示长负面词
+        display_negative_prompt = current_negative_prompt
+        if len(display_negative_prompt) > 200:
+            display_negative_prompt = display_negative_prompt[:200] + "..."
+        
+        cancel_text = TextContent.NEGATIVE_PROMPT_INPUT_CANCELLED + "\n\n" + TextContent.NEGATIVE_PROMPT_SETTINGS.format(
+            negative_prompt=display_negative_prompt
+        )
+        
+        await query.edit_message_text(
+            cancel_text,
+            reply_markup=Keyboards.negative_prompt_menu()
+        )
+
     @safe_call
     @require_auth
     async def handle_text_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """处理文本提示词"""
-    
+        
         prompt: str = update.message.text.strip()
         user_id: str = str(update.effective_user.id)
         username: str = update.effective_user.username or update.effective_user.first_name
         
+        if user_id in self.waiting_for_negative_prompt:
+            await self.handle_negative_prompt_input(update, user_id, prompt)
+            return
+
         # 清理上次生成消息的按钮
         last_msg_id = self.user_last_photo_msg.get(user_id)
         if last_msg_id:

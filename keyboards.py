@@ -6,6 +6,7 @@ class CallbackData(Enum):
     SD_STATUS = "sd_status"
     SD_SETTINGS = "sd_settings"
     RESOLUTION_SETTINGS = "resolution_settings"
+    NEGATIVE_PROMPT_SETTINGS = "negative_prompt_settings"  # 新增
     GENERATION_HISTORY = "generation_history"
     INPUT_PROMPT = "input_prompt"
     RANDOM_GENERATE = "random_generate"
@@ -13,6 +14,9 @@ class CallbackData(Enum):
     INTERRUPT = "interrupt_{task_id}"
     LIKE = "like_{task_id}"
     SET_RESOLUTION = "set_resolution_{res}"
+    SET_NEGATIVE_PROMPT = "set_negative_prompt"  # 新增
+    RESET_NEGATIVE_PROMPT = "reset_negative_prompt"  # 新增
+    CANCEL_NEGATIVE_PROMPT = "cancel_negative_prompt"  # 新增取消按钮
 
     @staticmethod
     def interrupt(task_id: str) -> str:
@@ -33,7 +37,6 @@ class Keyboards:
             [InlineKeyboardButton("🎨 生成图片", callback_data=CallbackData.TXT2IMG.value)],
             [InlineKeyboardButton("📊 SD状态", callback_data=CallbackData.SD_STATUS.value)],
             [InlineKeyboardButton("🛠️ SD设置", callback_data=CallbackData.SD_SETTINGS.value)],
-            [InlineKeyboardButton("📐 分辨率设置", callback_data=CallbackData.RESOLUTION_SETTINGS.value)],
             [InlineKeyboardButton("📈 生成历史", callback_data=CallbackData.GENERATION_HISTORY.value)],
         ])
 
@@ -62,6 +65,29 @@ class Keyboards:
             keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
         keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data=CallbackData.MAIN_MENU.value)])
         return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def sd_setting_menu() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📐 分辨率设置", callback_data=CallbackData.RESOLUTION_SETTINGS.value)],
+            [InlineKeyboardButton("🚫 负面词设置", callback_data=CallbackData.NEGATIVE_PROMPT_SETTINGS.value)],
+            [InlineKeyboardButton("🔙 返回主菜单", callback_data=CallbackData.MAIN_MENU.value)],
+        ])
+
+    @staticmethod
+    def negative_prompt_menu() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ 自定义负面词", callback_data=CallbackData.SET_NEGATIVE_PROMPT.value)],
+            [InlineKeyboardButton("🔄 恢复默认", callback_data=CallbackData.RESET_NEGATIVE_PROMPT.value)],
+            [InlineKeyboardButton("🔙 返回主菜单", callback_data=CallbackData.MAIN_MENU.value)],
+        ])
+
+    @staticmethod
+    def negative_prompt_input_menu() -> InlineKeyboardMarkup:
+        """输入负面词时显示的键盘，包含取消按钮"""
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ 取消输入", callback_data=CallbackData.CANCEL_NEGATIVE_PROMPT.value)],
+        ])
 
     @staticmethod
     def interrupt_keyboard(task_id: str) -> InlineKeyboardMarkup:

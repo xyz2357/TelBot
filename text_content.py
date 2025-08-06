@@ -25,6 +25,40 @@ class TextContent:
         "✅ 分辨率已设置为: {width}x{height}\n\n"
         "📝 此设置将在你的下次生成中生效"
     )
+    
+    # 新增负面词相关文本
+    NEGATIVE_PROMPT_SETTINGS = (
+        "🚫 负面词设置\n\n"
+        "当前负面词:\n"
+        "📝 {negative_prompt}\n\n"
+        "负面词用于告诉AI避免生成的内容，可以提高图片质量。"
+    )
+    INPUT_NEGATIVE_PROMPT = (
+        "🚫 请输入自定义负面词 (英文):\n\n"
+        "💡 常用负面词示例:\n"
+        "• lowres, bad anatomy, bad hands\n"
+        "• text, watermark, signature\n"
+        "• worst quality, low quality\n"
+        "• blurry, cropped, jpeg artifacts\n\n"
+        "⚠️ 多个负面词请用逗号分隔\n"
+        "📝 直接发送文字消息即可\n"
+        "❌ 或点击下方按钮取消输入"
+    )
+    NEGATIVE_PROMPT_INPUT_CANCELLED = (
+        "❌ 已取消负面词输入\n\n"
+        "返回负面词设置页面："
+    )
+    NEGATIVE_PROMPT_SET = (
+        "✅ 负面词已更新！\n\n"
+        "📝 新的负面词:\n{negative_prompt}\n\n"
+        "🎯 此设置将在你的下次生成中生效"
+    )
+    NEGATIVE_PROMPT_RESET = (
+        "🔄 负面词已重置为默认设置！\n\n"
+        "📝 默认负面词:\n{negative_prompt}"
+    )
+    NEGATIVE_PROMPT_TOO_LONG = "❌ 负面词过长，请控制在1000字符以内"
+    
     RANDOM_PROMPTS = [
         "a serene mountain landscape at sunset",
         "a cute robot in a colorful garden",
@@ -57,7 +91,7 @@ class TextContent:
         "🔢 步数: {steps}\n"
         "🎚️ CFG Scale: {cfg_scale}\n"
         "🎨 采样器: {sampler_name}\n\n"
-        "📝 默认负面提示词:\n{negative_prompt}"
+        "📝 当前负面词:\n{negative_prompt}"
     )
     GENERATION_HISTORY_HEADER = "📈 最近生成历史:\n\n"
     GENERATION_HISTORY_EMPTY = "📈 暂无生成历史"
@@ -77,13 +111,15 @@ class TextContent:
         "• 文生图 (txt2img)\n"
         "• SD WebUI状态监控\n"
         "• 分辨率自定义设置\n"
+        "• 负面词自定义设置\n"
         "• 生成队列管理\n"
         "• 生成历史记录\n\n"
         "✏️ 使用方法:\n"
         "1. 发送 /start 打开菜单\n"
         "2. 点击 '分辨率设置' 选择合适的分辨率\n"
-        "3. 点击 '生成图片' 选择模式\n"
-        "4. 直接发送英文提示词进行生成\n\n"
+        "3. 点击 '负面词设置' 自定义负面词\n"
+        "4. 点击 '生成图片' 选择模式\n"
+        "5. 直接发送英文提示词进行生成\n\n"
         "💡 提示词建议:\n"
         "• 使用英文描述\n"
         "• 示例: 'a beautiful sunset over mountains, oil painting style'"
