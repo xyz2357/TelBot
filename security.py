@@ -2,16 +2,40 @@
 import time
 from functools import wraps
 from config import Config
+from typing import Dict, Any, List, Optional, Tuple, TypedDict
+
+class Task(TypedDict):
+    user_id: str
+    prompt: str
+    start_time: float
+    completed: bool
+    end_time: Optional[float]
+    result: Optional[str]
+
+class GenerationRecord(TypedDict):
+    user_id: str
+    username: str
+    prompt: str
+    success: bool
+    error: str
+    timestamp: float
 
 class SecurityManager:
-    def __init__(self):
+    authorized_users: List[str]
+    generation_history: List[GenerationRecord]
+    tasks: Task
+
+    def __init__(self) -> None:
+        # 从配置加载授权用户ID（确保为str类型列表）
+        self.authorized_users = getattr(Config, "AUTHORIZED_USERS", [])
         self.generation_history = []
+        self.tasks = {}
         self.rate_limits = {}
-        self.active_tasks = {}  # 跟踪活跃任务
+        self.active_tasks: Task = {}  # 跟踪活跃任务
     
-    def is_authorized_user(self, user_id):
+    def is_authorized_user(self, user_id: str) -> bool:
         """检查用户是否被授权"""
-        return user_id in Config.AUTHORIZED_USERS
+        return user_id in self.authorized_users
     
     def is_safe_prompt(self, prompt):
         """检查提示词是否安全"""
@@ -32,7 +56,7 @@ class SecurityManager:
         
         return True, "安全"
     
-    def check_generation_limit(self, user_id, limit=3, window=300):
+    def check_generation_limit(self, user_id: str, limit=3, window=300) -> Tuple[bool, str]:
         return True, "通过"
         # """检查用户生图频率限制 (5分钟内最多3张)"""
         # now = time.time()
@@ -50,7 +74,7 @@ class SecurityManager:
         
         # return True, "通过"
     
-    def add_generation_record(self, user_id):
+    def add_generation_record(self, user_id: str) -> None:
         """添加生图记录"""
         now = time.time()
         if user_id not in self.rate_limits:
@@ -61,7 +85,7 @@ class SecurityManager:
         """获取当前队列大小"""
         return len([task for task in self.active_tasks.values() if not task.get('completed', False)])
     
-    def add_task(self, task_id, user_id, prompt):
+    def add_task(self, task_id: str, user_id: str, prompt: str) -> None:
         """添加任务到队列"""
         self.active_tasks[task_id] = {
             'user_id': user_id,
@@ -70,14 +94,14 @@ class SecurityManager:
             'completed': False
         }
     
-    def complete_task(self, task_id, result=None):
+    def complete_task(self, task_id: str, status: str) -> None:
         """标记任务完成"""
         if task_id in self.active_tasks:
             self.active_tasks[task_id]['completed'] = True
             self.active_tasks[task_id]['end_time'] = time.time()
-            self.active_tasks[task_id]['result'] = result
+            self.active_tasks[task_id]['result'] = status
     
-    def log_generation(self, user_id, username, prompt, success, error=None):
+    def log_generation(self, user_id: str, username: str, prompt: str, success: bool, error: Optional[str] = None) -> GenerationRecord:
         """记录生图日志"""
         log_entry = {
             'timestamp': time.time(),
@@ -97,7 +121,7 @@ def require_auth(func):
     """认证装饰器"""
     @wraps(func)
     async def wrapper(self, update, context):
-        user_id = update.effective_user.id
+        user_id = str(update.effective_user.id)  # 强制为str
         if not self.security.is_authorized_user(user_id):
             await update.message.reply_text("❌ 未授权访问")
             return

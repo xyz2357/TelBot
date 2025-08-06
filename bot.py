@@ -1,16 +1,17 @@
-# bot.py - 增强版本
 import logging
 import uuid
-import time
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from typing import Optional, Dict, Any
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from security import SecurityManager, require_auth
 from sd_controller import StableDiffusionController
-from config import Config
-from telegram.error import BadRequest
-from keyboards import Keyboards
+from config import Config, UserSettings
+from keyboards import Keyboards, CallbackData
 from user_manager import UserManager
+from view_manager import ViewManager
+from utils import safe_call
+from text_content import TextContent
 
 
 logging.basicConfig(
@@ -21,7 +22,14 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 class TelegramBot:
-    def __init__(self):
+    application: Optional[Application]
+    last_prompt: Optional[str]
+    user_last_photo_msg: Dict[str, int] 
+    security: SecurityManager
+    sd_controller: StableDiffusionController
+    user_manager: UserManager
+
+    def __init__(self) -> None:
         self.security = SecurityManager()
         self.sd_controller = StableDiffusionController()
         self.user_manager = UserManager(Config.SD_DEFAULT_PARAMS)
@@ -30,230 +38,182 @@ class TelegramBot:
         self.user_last_photo_msg = {}
 
     # 下面的代码只做流程分发，具体逻辑交给 manager/controller
-    def create_main_menu(self):
+    def create_main_menu(self) -> InlineKeyboardMarkup:
         return Keyboards.main_menu()
 
-    def create_generation_menu(self):
+    def create_generation_menu(self) -> InlineKeyboardMarkup:
         return Keyboards.generation_menu()
 
-    def create_resolution_menu(self, user_id):
+    def create_resolution_menu(self, user_id: str) -> InlineKeyboardMarkup:
         current_settings = self.user_manager.get_settings(user_id)
         current_res = f"{current_settings['width']}x{current_settings['height']}"
-        return Keyboards.resolution_menu(current_res, user_id, self.user_manager.get_settings)
+        return Keyboards.resolution_menu(current_res)
 
-    def get_user_settings(self, user_id):
+    def get_user_settings(self, user_id: str) -> UserSettings:
         return self.user_manager.get_settings(user_id)
 
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def start(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         """开始命令处理"""
         user = update.effective_user
-        
-        if not self.security.is_authorized_user(user.id):
+        user_id: str = str(user.id)
+        if not self.security.is_authorized_user(user_id):
             await update.message.reply_text(
-                f"❌ 用户 {user.username} (ID: {user.id}) 未被授权\n"
-                "请联系管理员添加你的用户ID到授权列表"
+                TextContent.USER_UNAUTHORIZED.format(username=user.username, userid=user.id)
             )
             return
-        
-        # 检查SD WebUI状态
         sd_status = await self.sd_controller.check_api_status()
-        status_text = "🟢 在线" if sd_status else "🔴 离线"
-        
-        welcome_text = (
-            f"🎯 Stable Diffusion 远程控制\n"
-            f"👤 用户: {user.first_name}\n"
-            f"🖥️ SD WebUI: {status_text}\n\n"
-            f"请选择要执行的操作:"
-        )
-        
+        status_text = TextContent.STATUS_ONLINE if sd_status else TextContent.STATUS_OFFLINE
+        welcome_text = TextContent.WELCOME.format(username=user.first_name, status=status_text)
         await update.message.reply_text(
             welcome_text,
-            reply_markup=self.create_main_menu()
+            reply_markup=Keyboards.main_menu()
         )
-    
+
     @require_auth
-    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_callback(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         """处理回调按钮"""
-        query = update.callback_query
+        query: CallbackQuery = update.callback_query
+        user_id: str = str(query.from_user.id)
         await query.answer()
         
-        data = query.data
-        user_id = query.from_user.id
+        data: CallbackData = query.data
 
-        if data.startswith("like_"):
+        if data.startswith(CallbackData.LIKE.value.split("{")[0]):
+            # like_{task_id}
             task_id = data.split("_", 1)[1]
             await self.sd_controller.save_last_result_locally()
             self.security.complete_task(task_id, "liked")
             old_caption = query.message.caption or ""
-            new_caption = f"{old_caption}\n\n✅ 已点赞并保存图片！"
+            new_caption = old_caption + TextContent.LIKED_CAPTION_APPEND
             await query.edit_message_caption(new_caption, reply_markup=None)
-        
-        elif data == "main_menu":
+        elif data == CallbackData.MAIN_MENU.value:
+            # main_menu
             sd_status = await self.sd_controller.check_api_status()
-            status_text = "🟢 在线" if sd_status else "🔴 离线"
-            
+            status_text = TextContent.STATUS_ONLINE if sd_status else TextContent.STATUS_OFFLINE
             await query.edit_message_text(
-                f"🎯 Stable Diffusion 远程控制\n🖥️ SD WebUI: {status_text}\n\n请选择操作:",
-                reply_markup=self.create_main_menu()
+                TextContent.WELCOME.format(username=query.from_user.first_name, status=status_text),
+                reply_markup=Keyboards.main_menu()
             )
-        
-        elif data == "txt2img":
+        elif data == CallbackData.TXT2IMG.value:
+            # txt2img
             await query.edit_message_text(
-                "🎨 图片生成选项:",
-                reply_markup=self.create_generation_menu()
+                TextContent.GENERATION_MENU,
+                reply_markup=Keyboards.generation_menu()
             )
-        
-        elif data == "input_prompt":
+        elif data == CallbackData.INPUT_PROMPT.value:
+            # input_prompt
             user_settings = self.get_user_settings(user_id)
             await query.edit_message_text(
-                "✏️ 请输入你的提示词 (英文):\n\n"
-                "💡 示例:\n"
-                "• a beautiful landscape with mountains\n"
-                "• cute cat sitting on a chair\n"
-                "• anime girl with blue hair\n\n"
-                f"📐 当前分辨率: {user_settings['width']}x{user_settings['height']}\n"
-                "⚠️ 直接发送文字消息即可，无需命令前缀"
+                TextContent.INPUT_PROMPT.format(
+                    resolution=f"{user_settings['width']}x{user_settings['height']}"
+                )
             )
-        
-        elif data == "random_generate":
+        elif data == CallbackData.RANDOM_GENERATE.value:
+            # random_generate
             await self.random_generate(query)
-        
-        elif data == "sd_status":
+        elif data == CallbackData.SD_STATUS.value:
+            # sd_status
             await self.show_sd_status(query)
-        
-        elif data == "sd_settings":
+        elif data == CallbackData.SD_SETTINGS.value:
+            # sd_settings
             await self.show_sd_settings(query)
-        
-        elif data == "resolution_settings":
-            await self.show_resolution_settings(query, user_id)
-        
-        elif data == "generation_history":
+        elif data == CallbackData.GENERATION_HISTORY.value:
+            # generation_history
             await self.show_generation_history(query)
-        
-        elif data.startswith("set_resolution_"):
+        elif data == CallbackData.RESOLUTION_SETTINGS.value:
+            # resolution_settings
+            await self.show_resolution_settings(query, user_id)
+        elif data.startswith(CallbackData.SET_RESOLUTION.value.split("{")[0]):  # "set_resolution_"
+            # set_resolution_{res}
             await self.set_resolution(query, data, user_id)
-        
-        elif data.startswith("interrupt_"):
+        elif data.startswith(CallbackData.INTERRUPT.value.split("{")[0]):  # "interrupt_"
+            # interrupt_{task_id}
             task_id = data.split("_", 1)[1]
             await self.interrupt_generation(query, task_id)
-    
-    async def show_resolution_settings(self, query, user_id):
+
+    async def show_resolution_settings(self, query: CallbackQuery, user_id: str) -> None:
         """显示分辨率设置菜单"""
         user_settings = self.get_user_settings(user_id)
         current_res = f"{user_settings['width']}x{user_settings['height']}"
-        
-        text = (
-            f"📐 分辨率设置\n\n"
-            f"当前分辨率: {current_res}\n"
-            f"请选择新的分辨率:"
-        )
-        
+        text = TextContent.RESOLUTION_SETTINGS.format(resolution=current_res)
         await query.edit_message_text(
             text,
-            reply_markup=self.create_resolution_menu(user_id)
+            reply_markup=Keyboards.resolution_menu(current_res)
         )
-    
-    async def set_resolution(self, query, callback_data, user_id):
+
+    async def set_resolution(self, query: CallbackQuery, callback_data: str, user_id: str) -> None:
         """设置用户分辨率"""
         parts = callback_data.split("_")
         width = int(parts[2])
         height = int(parts[3])
-        
-        # 更新用户设置
         user_settings = self.get_user_settings(user_id)
         user_settings['width'] = width
         user_settings['height'] = height
-        
         await query.edit_message_text(
-            f"✅ 分辨率已设置为: {width}x{height}\n\n"
-            f"📝 此设置将在你的下次生成中生效",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📐 继续修改", callback_data="resolution_settings"),
-                InlineKeyboardButton("🔙 返回主菜单", callback_data="main_menu")
-            ]])
+            TextContent.RESOLUTION_SET.format(width=width, height=height),
+            reply_markup=Keyboards.resolution_menu(f"{width}x{height}")
         )
-    
-    async def random_generate(self, query):
+
+    async def random_generate(self, query: CallbackQuery) -> None:
         """随机生成图片"""
-        random_prompts = [
-            "a serene mountain landscape at sunset",
-            "a cute robot in a colorful garden",
-            "a magical forest with glowing mushrooms",
-            "a cozy coffee shop in the rain",
-            "a majestic dragon flying over clouds",
-            "a peaceful beach with crystal clear water",
-            "a steampunk city with flying machines",
-            "a lovely cottage surrounded by flowers"
-        ]
-        
         import random
-        prompt = random.choice(random_prompts)
-        
-        await query.edit_message_text(f"🎲 随机生成中...\n提示词: {prompt}")
-        await self.generate_image_task(query.from_user.id, query.from_user.username, prompt, query.message)
-    
-    async def show_sd_status(self, query):
+        prompt: str = random.choice(TextContent.RANDOM_PROMPTS)
+        await query.edit_message_text(TextContent.RANDOM_GENERATE.format(prompt=prompt))
+        user_id: str = str(query.from_user.id)
+        username: str = query.from_user.username or query.from_user.first_name
+        await self.generate_image_task(user_id, username, prompt, query.message)
+
+    async def show_sd_status(self, query: CallbackQuery) -> None:
         """显示SD WebUI状态"""
-        api_status = await self.sd_controller.check_api_status()
+        api_status: bool = await self.sd_controller.check_api_status()
         
         if api_status:
             models = await self.sd_controller.get_models()
             samplers = await self.sd_controller.get_samplers()
             progress, eta = await self.sd_controller.get_progress()
-            
-            # 获取当前模型 - 需要添加这个方法到 sd_controller
             current_model = await self.sd_controller.get_current_model()
-            
-            status_text = (
-                f"🟢 Stable Diffusion WebUI 状态\n\n"
-                f"📡 API: 在线\n"
-                f"🎯 当前模型: {current_model}\n"
-                f"📦 可用模型: {len(models)}\n"
-                f"⚙️ 可用采样器: {len(samplers)}\n"
-                f"📊 当前进度: {progress*100:.1f}%\n"
+            eta_text = TextContent.ETA_TEXT.format(eta=eta) if eta > 0 else ""
+            status_text = TextContent.SD_STATUS_ONLINE.format(
+                current_model=current_model,
+                model_count=len(models),
+                sampler_count=len(samplers),
+                progress=progress*100,
+                eta_text=eta_text
             )
-            
-            if eta > 0:
-                status_text += f"⏱️ 预计剩余: {eta:.1f}秒\n"
         else:
-            status_text = (
-                f"🔴 Stable Diffusion WebUI 离线\n\n"
-                f"请确保WebUI已启动并开启API\n"
-                f"启动命令: --api --listen\n"
-                f"API地址: {Config.SD_API_URL}"
-            )
+            status_text = TextContent.SD_STATUS_OFFLINE.format(api_url=Config.SD_API_URL)
         
-        keyboard = [[InlineKeyboardButton("🔙 返回", callback_data="main_menu")]]
+        keyboard = Keyboards.main_menu()
         await query.edit_message_text(
             status_text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=keyboard
         )
     
-    async def show_sd_settings(self, query):
+    async def show_sd_settings(self, query: CallbackQuery) -> None:
         """显示SD设置信息"""
-        user_id = query.from_user.id
+        user_id: str = str(query.from_user.id)
         user_settings = self.get_user_settings(user_id)
         
-        settings_text = (
-            f"🛠️ 当前设置:\n\n"
-            f"📐 分辨率: {user_settings['width']}x{user_settings['height']}\n"
-            f"🔢 步数: {user_settings['steps']}\n"
-            f"🎚️ CFG Scale: {user_settings['cfg_scale']}\n"
-            f"🎨 采样器: {user_settings['sampler_name']}\n\n"
-            f"📝 默认负面提示词:\n{user_settings['negative_prompt'][:100]}..."
+        settings_text = TextContent.SD_SETTINGS.format(
+            width=user_settings['width'],
+            height=user_settings['height'],
+            steps=user_settings['steps'],
+            cfg_scale=user_settings['cfg_scale'],
+            sampler_name=user_settings['sampler_name'],
+            negative_prompt=user_settings['negative_prompt'][:100] + "..."
         )
         
-        keyboard = [[InlineKeyboardButton("🔙 返回", callback_data="main_menu")]]
+        keyboard = Keyboards.main_menu()
         await query.edit_message_text(
             settings_text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=keyboard
         )
     
-    async def show_generation_history(self, query):
+    async def show_generation_history(self, query: CallbackQuery) -> None:
         """显示生成历史"""
         history = self.security.generation_history[-5:]  # 最近5条
         if history:
-            text = "📈 最近生成历史:\n\n"
+            text = TextContent.GENERATION_HISTORY_HEADER
             for entry in reversed(history):
                 timestamp = datetime.fromtimestamp(entry['timestamp']).strftime("%H:%M:%S")
                 status = "✅" if entry['success'] else "❌"
@@ -263,21 +223,22 @@ class TelegramBot:
                     text += f"⚠️ {entry['error']}\n"
                 text += "\n"
         else:
-            text = "📈 暂无生成历史"
+            text = TextContent.GENERATION_HISTORY_EMPTY
         
-        keyboard = [[InlineKeyboardButton("🔙 返回", callback_data="main_menu")]]
+        keyboard = Keyboards.main_menu()
         await query.edit_message_text(
             text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=keyboard
         )
     
+    @safe_call
     @require_auth
-    async def handle_text_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_text_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """处理文本提示词"""
     
-        prompt = update.message.text.strip()
-        user_id = update.effective_user.id
-        username = update.effective_user.username or update.effective_user.first_name
+        prompt: str = update.message.text.strip()
+        user_id: str = str(update.effective_user.id)
+        username: str = update.effective_user.username or update.effective_user.first_name
         
         # 清理上次生成消息的按钮
         last_msg_id = self.user_last_photo_msg.get(user_id)
@@ -297,25 +258,24 @@ class TelegramBot:
         # 安全检查
         safe, safety_msg = self.security.is_safe_prompt(prompt)
         if not safe:
-            await update.message.reply_text(f"❌ 提示词不安全: {safety_msg}")
+            await update.message.reply_text(TextContent.PROMPT_UNSAFE.format(msg=safety_msg))
             return
         
         limit, limit_msg = self.security.check_generation_limit(user_id)
         if not limit:
-            await update.message.reply_text(
-                limit_msg + "\n\n"
-            )
+            await update.message.reply_text(limit_msg + "\n\n")
             return
         
         # 队列限制检查
         if self.security.get_queue_size() >= Config.MAX_QUEUE_SIZE:
-            await update.message.reply_text(f"⚠️ 队列已满，请稍后再试")
+            await update.message.reply_text(TextContent.QUEUE_FULL)
             return
 
         # 开始生成
         await self.generate_image_task(user_id, username, prompt, update.message)
     
-    async def generate_image_task(self, user_id, username, prompt, message):
+    @safe_call
+    async def generate_image_task(self, user_id: str, username: str, prompt: str, message: Message) -> None:
         """生成图片任务"""
         task_id = str(uuid.uuid4())[:8]
         self.last_prompt = prompt  # 保存最后的提示词
@@ -328,128 +288,84 @@ class TelegramBot:
         self.security.add_generation_record(user_id)
         
         # 创建中断按钮
-        keyboard = [[InlineKeyboardButton("⏹️ 中断生成", callback_data=f"interrupt_{task_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard = Keyboards.interrupt_keyboard(task_id)
+        reply_markup = keyboard
         
-        try:
-            # 显示生成进度
-            progress_msg = await message.reply_text(
-                f"⏳ 生成中... (任务ID: {task_id})\n"
-                f"💭 {prompt[:50]}{'...' if len(prompt) > 50 else ''}\n"
-                f"📐 {user_settings['width']}x{user_settings['height']}",
+        # 显示生成进度
+        progress_msg = await message.reply_text(
+            TextContent.GENERATE_PROGRESS.format(
+                task_id=task_id,
+                prompt=prompt[:50] + ('...' if len(prompt) > 50 else ''),
+                resolution=f"{user_settings['width']}x{user_settings['height']}"
+            ),
+            reply_markup=reply_markup
+        )
+        
+        # 调用SD API生成图片，使用用户设置
+        success, result = await self.sd_controller.generate_image(
+            prompt, 
+            **user_settings  # 使用用户自定义设置
+        )
+        
+        if success:
+            reply_markup = Keyboards.like_keyboard(task_id)
+            await progress_msg.edit_text(TextContent.GENERATE_SUCCESS)
+            caption = TextContent.GENERATE_CAPTION.format(
+                prompt=prompt,
+                resolution=f"{user_settings['width']}x{user_settings['height']}"
+            )
+            sent_msg = await message.reply_photo(
+                photo=result,
+                caption=caption,
                 reply_markup=reply_markup
             )
             
-            # 调用SD API生成图片，使用用户设置
-            success, result = await self.sd_controller.generate_image(
-                prompt, 
-                **user_settings  # 使用用户自定义设置
-            )
-            
-            if success:
-                keyboard = [[InlineKeyboardButton("👍 点赞并保存", callback_data=f"like_{task_id}")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                # 生成成功，发送图片
-                await progress_msg.edit_text(f"✅ 生成完成！正在上传图片...")
-                
-                # 发送图片
-                caption = (
-                    f"🎨 生成完成\n"
-                    f"💭 {prompt}\n"
-                    f"📐 {user_settings['width']}x{user_settings['height']}\n"
-                )
-                
-                sent_msg = await message.reply_photo(
-                    photo=result,
-                    caption=caption,
-                    reply_markup=reply_markup
-                )
-                
-                self.user_last_photo_msg[user_id] = sent_msg.message_id
+            self.user_last_photo_msg[user_id] = sent_msg.message_id
 
-                # 清理进度消息
-                try:
-                    await progress_msg.delete()
-                except:
-                    pass
-                
-                # 记录成功日志
-                self.security.log_generation(user_id, username, prompt, True)
-                self.security.complete_task(task_id, "success")
-                
-            else:
-                # 生成失败
-                await progress_msg.edit_text(
-                    f"❌ 生成失败\n"
-                    f"错误: {result}\n"
-                    f"💭 {prompt[:50]}{'...' if len(prompt) > 50 else ''}"
-                )
-                
-                # 记录失败日志
-                self.security.log_generation(user_id, username, prompt, False, result)
-                self.security.complete_task(task_id, f"failed: {result}")
-                
-        except Exception as e:
-            error_msg = f"系统错误: {str(e)}"
+            # 清理进度消息
             try:
-                await progress_msg.edit_text(
-                    f"❌ 系统错误\n"
-                    f"错误: {error_msg}\n"
-                    f"💭 {prompt[:50]}{'...' if len(prompt) > 50 else ''}"
-                )
+                await progress_msg.delete()
             except:
-                await message.reply_text(f"❌ 生成过程中出现错误: {error_msg}")
+                pass
             
-            # 记录错误日志
-            self.security.log_generation(user_id, username, prompt, False, error_msg)
-            self.security.complete_task(task_id, f"error: {error_msg}")
-
+            # 记录成功日志
+            self.security.log_generation(user_id, username, prompt, True)
+            self.security.complete_task(task_id, "success")
+            
+        else:
+            # 生成失败
+            await progress_msg.edit_text(TextContent.GENERATE_FAIL.format(error=result, prompt=prompt[:50]))
+            
+            # 记录失败日志
+            self.security.log_generation(user_id, username, prompt, False, result)
+            self.security.complete_task(task_id, f"failed: {result}")
+    
     @require_auth
-    async def regenerate_image_with_last_prompt_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def regenerate_image_with_last_prompt_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """重新生成上一个提示词的图片"""
         prompt = self.last_prompt
-        user_id = update.effective_user.id
+        user_id: str = str(update.effective_user.id)
         username = update.effective_user.username or update.effective_user.first_name
         if self.last_prompt is not None:
             await self.generate_image_task(user_id, username, self.last_prompt, update.message)
         else:
-            await update.message.reply_text("❌ 没有可用的上一个提示词，请先生成图片。")
+            await update.message.reply_text(TextContent.NO_LAST_PROMPT)
     
-    async def interrupt_generation(self, query, task_id):
+    async def interrupt_generation(self, query: CallbackQuery, task_id: str) -> None:
         """中断生成任务"""
         success = await self.sd_controller.interrupt_generation()
         
         if success:
             self.security.complete_task(task_id, "interrupted")
-            await query.edit_message_text(f"⏹️ 任务 {task_id} 已中断")
+            await query.edit_message_text(TextContent.INTERRUPT_SUCCESS.format(task_id=task_id))
         else:
-            await query.edit_message_text(f"❌ 无法中断任务 {task_id}")
+            await query.edit_message_text(TextContent.INTERRUPT_FAIL.format(task_id=task_id))
     
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """帮助命令"""
-        help_text = (
-            "🤖 Stable Diffusion 远程控制帮助\n\n"
-            "📋 可用命令:\n"
-            "/start - 显示主菜单\n"
-            "/help - 显示此帮助\n\n"
-            "🎨 功能说明:\n"
-            "• 文生图 (txt2img)\n"
-            "• SD WebUI状态监控\n"
-            "• 分辨率自定义设置\n"
-            "• 生成队列管理\n"
-            "• 生成历史记录\n\n"
-            "✏️ 使用方法:\n"
-            "1. 发送 /start 打开菜单\n"
-            "2. 点击 '分辨率设置' 选择合适的分辨率\n"
-            "3. 点击 '生成图片' 选择模式\n"
-            "4. 直接发送英文提示词进行生成\n\n"
-            "💡 提示词建议:\n"
-            "• 使用英文描述\n"
-            "• 示例: 'a beautiful sunset over mountains, oil painting style'"
-        )
-        await update.message.reply_text(help_text)
+        await update.message.reply_text(TextContent.HELP)
     
-    def run(self):
+    def run(self) -> None:
         """运行机器人"""
         if not Config.BOT_TOKEN:
             logger.error("请在 .env 文件中设置 BOT_TOKEN")

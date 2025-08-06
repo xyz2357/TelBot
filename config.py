@@ -1,13 +1,22 @@
 # config.py
 import os
 from dotenv import load_dotenv
+from typing import TypedDict
 
 load_dotenv()
+
+class UserSettings(TypedDict):
+    width: int
+    height: int
+    steps: int
+    cfg_scale: float
+    sampler_name: str
+    negative_prompt: str
 
 class Config:
     # Telegram配置
     BOT_TOKEN = os.getenv('BOT_TOKEN')
-    AUTHORIZED_USERS = [int(x) for x in os.getenv('AUTHORIZED_USERS', '').split(',') if x]
+    AUTHORIZED_USERS = os.getenv("AUTHORIZED_USERS", "").split(",") # 逗号分隔的用户ID列表
     
     # Stable Diffusion WebUI配置
     SD_API_URL = os.getenv('SD_API_URL', 'http://127.0.0.1:7860')
@@ -18,7 +27,7 @@ class Config:
     MAX_QUEUE_SIZE = 5  # 最大并发任务数
     
     # SD默认参数
-    SD_DEFAULT_PARAMS = {
+    SD_DEFAULT_PARAMS: UserSettings = {
         'width': 1024,
         'height': 1024,
         'steps': 20,
