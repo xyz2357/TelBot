@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.env
+*.sqlite3
+*.db
+
+# VS Code
+.vscode/
+
+# 环境/依赖
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# 日志和输出
+*.log
+*.out
+
+# 图片生成目录
+generated_images/
+
+# 系统
