@@ -26,8 +26,8 @@
 ### 1. 克隆项目
 
 ```bash
-git clone <your-repo-url>
-cd stable-diffusion-telegram-bot
+git clone https://github.com/xyz2357/TelBot
+cd TelBot
 ```
 
 ### 2. 安装依赖
