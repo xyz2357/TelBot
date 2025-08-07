@@ -26,7 +26,7 @@ class TextContent:
         "📝 此设置将在你的下次生成中生效"
     )
     
-    # 新增负面词相关文本
+    # 负面词相关文本
     NEGATIVE_PROMPT_SETTINGS = (
         "🚫 负面词设置\n\n"
         "当前负面词:\n"
@@ -59,6 +59,64 @@ class TextContent:
     )
     NEGATIVE_PROMPT_TOO_LONG = "❌ 负面词过长，请控制在1000字符以内"
     
+    # 新增表单相关文本
+    ADVANCED_FORM_TITLE = (
+        "📝 高级生成表单\n\n"
+        "您可以设置详细的生成参数，未设置的项目将使用默认值："
+    )
+    
+    FORM_INPUT_PROMPT = (
+        "✏️ 请输入正面词 (提示词):\n\n"
+        "💡 描述您想要生成的图像内容\n"
+        "📝 使用英文，可以留空使用随机提示词\n\n"
+        "示例:\n"
+        "• a beautiful anime girl with long hair\n"
+        "• mountain landscape at sunset\n"
+        "• cute robot in a garden\n\n"
+        "⚠️ 直接发送文字消息，或发送 'skip' 跳过此项"
+    )
+    
+    FORM_INPUT_SEED = (
+        "🎲 请输入图像种子 (Seed):\n\n"
+        "💡 种子用于控制随机性，相同种子会生成相似图像\n"
+        "📝 输入数字 (如: 123456789) 或发送 'random' 使用随机种子\n"
+        "🔢 种子范围: 0 到 4294967295\n\n"
+        "⚠️ 直接发送数字或 'random'，或发送 'skip' 跳过此项"
+    )
+    
+    FORM_RESOLUTION_MENU = (
+        "📐 请选择分辨率:\n\n"
+        "当前选择: {current_resolution}\n"
+        "不同分辨率适用于不同场景，请根据需要选择："
+    )
+    
+    FORM_PROMPT_SET = "✅ 正面词已设置: {prompt}"
+    FORM_PROMPT_SKIPPED = "⏭️ 正面词已跳过，将使用随机提示词"
+    FORM_SEED_SET = "✅ 种子已设置: {seed}"
+    FORM_SEED_RANDOM = "🎲 种子已设置为随机"
+    FORM_SEED_SKIPPED = "⏭️ 种子已跳过，将使用随机种子"
+    FORM_SEED_INVALID = "❌ 种子格式错误，请输入数字、'random' 或 'skip'"
+    FORM_RESOLUTION_SET = "✅ 分辨率已设置: {resolution}"
+    FORM_HIRES_ENABLED = "✅ 高清分辨修复已开启"
+    FORM_HIRES_DISABLED = "❌ 高清分辨修复已关闭"
+    FORM_RESET_SUCCESS = "🔄 表单已重置"
+    FORM_INPUT_CANCELLED = "❌ 输入已取消"
+    
+    FORM_GENERATE_MISSING_PROMPT = (
+        "⚠️ 未设置正面词，将使用随机提示词生成\n\n"
+        "点击 '🚀 生成图片' 确认，或先设置正面词"
+    )
+    
+    FORM_SUMMARY = (
+        "📋 当前表单设置:\n\n"
+        "✏️ 正面词: {prompt}\n"
+        "📐 分辨率: {resolution}\n"
+        "🎲 种子: {seed}\n"
+        "🔍 高清修复: {hires_fix}\n\n"
+        "请选择操作："
+    )
+    
+    # 原有文本保持不变
     RANDOM_PROMPTS = [
         "a serene mountain landscape at sunset",
         "a cute robot in a colorful garden",
@@ -112,6 +170,7 @@ class TextContent:
         "• SD WebUI状态监控\n"
         "• 分辨率自定义设置\n"
         "• 负面词自定义设置\n"
+        "• 高级表单生成 (新增)\n"
         "• 生成队列管理\n"
         "• 生成历史记录\n\n"
         "✏️ 使用方法:\n"
@@ -119,7 +178,8 @@ class TextContent:
         "2. 点击 '分辨率设置' 选择合适的分辨率\n"
         "3. 点击 '负面词设置' 自定义负面词\n"
         "4. 点击 '生成图片' 选择模式\n"
-        "5. 直接发送英文提示词进行生成\n\n"
+        "5. 选择 '高级表单' 进行详细设置\n"
+        "6. 直接发送英文提示词进行快速生成\n\n"
         "💡 提示词建议:\n"
         "• 使用英文描述\n"
         "• 示例: 'a beautiful sunset over mountains, oil painting style'"

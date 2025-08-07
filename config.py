@@ -1,7 +1,7 @@
 # config.py
 import os
 from dotenv import load_dotenv
-from typing import TypedDict
+from typing import TypedDict, Optional
 
 load_dotenv()
 
@@ -12,6 +12,12 @@ class UserSettings(TypedDict):
     cfg_scale: float
     sampler_name: str
     negative_prompt: str
+
+class FormData(TypedDict):
+    prompt: Optional[str]
+    resolution: Optional[str]  # 格式如 "1024x1024"
+    seed: Optional[int]  # None 表示随机
+    hires_fix: bool
 
 class Config:
     # Telegram配置
@@ -34,6 +40,14 @@ class Config:
         'cfg_scale': 7.0,
         'sampler_name': 'Euler a',
         'negative_prompt': 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry'
+    }
+    
+    # 表单默认数据
+    DEFAULT_FORM_DATA: FormData = {
+        'prompt': None,
+        'resolution': None,
+        'seed': None,
+        'hires_fix': False
     }
     
     # 图片保存设置

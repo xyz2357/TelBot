@@ -10,6 +10,7 @@ from config import Config, UserSettings
 from keyboards import Keyboards, CallbackData
 from user_manager import UserManager
 from view_manager import ViewManager
+from form_manager import FormManager
 from utils import safe_call
 from text_content import TextContent
 
@@ -28,15 +29,17 @@ class TelegramBot:
     security: SecurityManager
     sd_controller: StableDiffusionController
     user_manager: UserManager
+    form_manager: FormManager
 
     def __init__(self) -> None:
         self.security = SecurityManager()
         self.sd_controller = StableDiffusionController()
         self.user_manager = UserManager(Config.SD_DEFAULT_PARAMS)
+        self.form_manager = FormManager()
         self.application = None
         self.last_prompt = None
         self.user_last_photo_msg = {}
-        self.waiting_for_negative_prompt = set()  # 新增：跟踪等待输入负面词的用户
+        self.waiting_for_negative_prompt = set()
 
     # 下面的代码只做流程分发，具体逻辑交给 manager/controller
     def create_main_menu(self) -> InlineKeyboardMarkup:
@@ -112,6 +115,9 @@ class TelegramBot:
         elif data == CallbackData.RANDOM_GENERATE.value:
             # random_generate
             await self.random_generate(query)
+        elif data == CallbackData.ADVANCED_FORM.value:
+            # advanced_form - 新增表单功能
+            await self.show_advanced_form(query, user_id)
         elif data == CallbackData.SD_STATUS.value:
             # sd_status
             await self.show_sd_status(query)
@@ -141,9 +147,35 @@ class TelegramBot:
             # reset_negative_prompt
             await self.reset_negative_prompt(query, user_id)
         elif data == CallbackData.CANCEL_NEGATIVE_PROMPT.value:
-            # cancel_negative_prompt - 新增的取消功能
+            # cancel_negative_prompt
             await self.cancel_negative_prompt_input(query, user_id)
+        # 新增表单相关回调处理
+        elif data == CallbackData.FORM_SET_PROMPT.value:
+            # form_set_prompt
+            await self.request_form_prompt_input(query, user_id)
+        elif data == "form_set_resolution_menu":
+            # form_set_resolution_menu
+            await self.show_form_resolution_menu(query, user_id)
+        elif data.startswith("form_set_resolution_"):
+            # form_set_resolution_{res}
+            await self.set_form_resolution(query, data, user_id)
+        elif data == CallbackData.FORM_SET_SEED.value:
+            # form_set_seed
+            await self.request_form_seed_input(query, user_id)
+        elif data == CallbackData.FORM_TOGGLE_HIRES.value:
+            # form_toggle_hires
+            await self.toggle_form_hires(query, user_id)
+        elif data == CallbackData.FORM_GENERATE.value:
+            # form_generate
+            await self.generate_from_form(query, user_id)
+        elif data == CallbackData.FORM_RESET.value:
+            # form_reset
+            await self.reset_form(query, user_id)
+        elif data == CallbackData.FORM_CANCEL_INPUT.value:
+            # form_cancel_input
+            await self.cancel_form_input(query, user_id)
 
+    # 原有方法保持不变
     async def show_resolution_settings(self, query: CallbackQuery, user_id: str) -> None:
         """显示分辨率设置菜单"""
         user_settings = self.get_user_settings(user_id)
@@ -267,7 +299,7 @@ class TelegramBot:
         self.waiting_for_negative_prompt.add(user_id)
         await query.edit_message_text(
             TextContent.INPUT_NEGATIVE_PROMPT,
-            reply_markup=Keyboards.negative_prompt_input_menu()  # 使用带取消按钮的键盘
+            reply_markup=Keyboards.negative_prompt_input_menu()
         )
 
     async def reset_negative_prompt(self, query: CallbackQuery, user_id: str) -> None:
@@ -331,6 +363,181 @@ class TelegramBot:
             reply_markup=Keyboards.negative_prompt_menu()
         )
 
+    # 新增表单相关方法
+    async def show_advanced_form(self, query: CallbackQuery, user_id: str) -> None:
+        """显示高级表单"""
+        form_data = self.form_manager.get_user_form(user_id)
+        summary = self.form_manager.format_form_summary(user_id)
+        
+        text = TextContent.ADVANCED_FORM_TITLE + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
+        await query.edit_message_text(
+            text,
+            reply_markup=Keyboards.advanced_form_menu(form_data)
+        )
+
+    async def request_form_prompt_input(self, query: CallbackQuery, user_id: str) -> None:
+        """请求表单正面词输入"""
+        self.form_manager.set_input_state(user_id, "prompt")
+        await query.edit_message_text(
+            TextContent.FORM_INPUT_PROMPT,
+            reply_markup=Keyboards.form_input_cancel_menu()
+        )
+
+    async def show_form_resolution_menu(self, query: CallbackQuery, user_id: str) -> None:
+        """显示表单分辨率选择菜单"""
+        form_data = self.form_manager.get_user_form(user_id)
+        current_res = form_data.get('resolution', '')
+        
+        text = TextContent.FORM_RESOLUTION_MENU.format(current_resolution=current_res or "未设置")
+        await query.edit_message_text(
+            text,
+            reply_markup=Keyboards.form_resolution_menu(current_res)
+        )
+
+    async def set_form_resolution(self, query: CallbackQuery, callback_data: str, user_id: str) -> None:
+        """设置表单分辨率"""
+        # 解析 form_set_resolution_1024_1024 格式
+        parts = callback_data.split("_")
+        width = int(parts[3])
+        height = int(parts[4])
+        resolution = f"{width}x{height}"
+        
+        self.form_manager.update_form_field(user_id, 'resolution', resolution)
+        
+        await query.edit_message_text(
+            TextContent.FORM_RESOLUTION_SET.format(resolution=resolution),
+            reply_markup=Keyboards.form_resolution_menu(resolution)
+        )
+
+    async def request_form_seed_input(self, query: CallbackQuery, user_id: str) -> None:
+        """请求表单种子输入"""
+        self.form_manager.set_input_state(user_id, "seed")
+        await query.edit_message_text(
+            TextContent.FORM_INPUT_SEED,
+            reply_markup=Keyboards.form_input_cancel_menu()
+        )
+
+    async def toggle_form_hires(self, query: CallbackQuery, user_id: str) -> None:
+        """切换表单高清修复选项"""
+        form_data = self.form_manager.get_user_form(user_id)
+        current_hires = form_data.get('hires_fix', False)
+        new_hires = not current_hires
+        
+        self.form_manager.update_form_field(user_id, 'hires_fix', new_hires)
+        
+        message = TextContent.FORM_HIRES_ENABLED if new_hires else TextContent.FORM_HIRES_DISABLED
+        
+        # 更新表单显示
+        summary = self.form_manager.format_form_summary(user_id)
+        text = message + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=Keyboards.advanced_form_menu(form_data)
+        )
+
+    async def generate_from_form(self, query: CallbackQuery, user_id: str) -> None:
+        """从表单生成图片"""
+        form_data = self.form_manager.get_user_form(user_id)
+        username = query.from_user.username or query.from_user.first_name
+        
+        # 获取提示词
+        prompt = self.form_manager.get_prompt_from_form(user_id, TextContent.RANDOM_PROMPTS)
+        
+        await query.edit_message_text(
+            f"🚀 正在使用表单设置生成图片...\n💭 {prompt[:50]}{'...' if len(prompt) > 50 else ''}"
+        )
+        
+        # 生成图片，传递表单数据标识
+        await self.generate_image_task(user_id, username, prompt, query.message, from_form=True)
+
+    async def reset_form(self, query: CallbackQuery, user_id: str) -> None:
+        """重置表单"""
+        self.form_manager.reset_user_form(user_id)
+        
+        form_data = self.form_manager.get_user_form(user_id)
+        summary = self.form_manager.format_form_summary(user_id)
+        
+        text = TextContent.FORM_RESET_SUCCESS + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
+        await query.edit_message_text(
+            text,
+            reply_markup=Keyboards.advanced_form_menu(form_data)
+        )
+
+    async def cancel_form_input(self, query: CallbackQuery, user_id: str) -> None:
+        """取消表单输入"""
+        self.form_manager.clear_input_state(user_id)
+        
+        # 返回表单页面
+        form_data = self.form_manager.get_user_form(user_id)
+        summary = self.form_manager.format_form_summary(user_id)
+        
+        text = TextContent.FORM_INPUT_CANCELLED + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
+        await query.edit_message_text(
+            text,
+            reply_markup=Keyboards.advanced_form_menu(form_data)
+        )
+
+    async def handle_form_input(self, update: Update, user_id: str, input_text: str) -> None:
+        """处理表单输入"""
+        input_state = self.form_manager.get_input_state(user_id)
+        
+        if input_state == "prompt":
+            await self.handle_form_prompt_input(update, user_id, input_text)
+        elif input_state == "seed":
+            await self.handle_form_seed_input(update, user_id, input_text)
+
+    async def handle_form_prompt_input(self, update: Update, user_id: str, prompt: str) -> None:
+        """处理表单正面词输入"""
+        self.form_manager.clear_input_state(user_id)
+        
+        if prompt.lower().strip() == 'skip':
+            self.form_manager.update_form_field(user_id, 'prompt', None)
+            message = TextContent.FORM_PROMPT_SKIPPED
+        else:
+            self.form_manager.update_form_field(user_id, 'prompt', prompt)
+            display_prompt = prompt[:50] + '...' if len(prompt) > 50 else prompt
+            message = TextContent.FORM_PROMPT_SET.format(prompt=display_prompt)
+        
+        # 返回表单页面
+        form_data = self.form_manager.get_user_form(user_id)
+        summary = self.form_manager.format_form_summary(user_id)
+        text = message + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
+        
+        await update.message.reply_text(
+            text,
+            reply_markup=Keyboards.advanced_form_menu(form_data)
+        )
+
+    async def handle_form_seed_input(self, update: Update, user_id: str, seed_text: str) -> None:
+        """处理表单种子输入"""
+        self.form_manager.clear_input_state(user_id)
+        
+        is_valid, seed_value, status = self.form_manager.validate_seed(seed_text)
+        
+        if not is_valid:
+            await update.message.reply_text(TextContent.FORM_SEED_INVALID)
+            return
+        
+        self.form_manager.update_form_field(user_id, 'seed', seed_value)
+        
+        if status == "已跳过":
+            message = TextContent.FORM_SEED_SKIPPED
+        elif status == "随机":
+            message = TextContent.FORM_SEED_RANDOM
+        else:
+            message = TextContent.FORM_SEED_SET.format(seed=seed_value)
+        
+        # 返回表单页面
+        form_data = self.form_manager.get_user_form(user_id)
+        summary = self.form_manager.format_form_summary(user_id)
+        text = message + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
+        
+        await update.message.reply_text(
+            text,
+            reply_markup=Keyboards.advanced_form_menu(form_data)
+        )
+
     @safe_call
     @require_auth
     async def handle_text_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -339,6 +546,11 @@ class TelegramBot:
         prompt: str = update.message.text.strip()
         user_id: str = str(update.effective_user.id)
         username: str = update.effective_user.username or update.effective_user.first_name
+        
+        # 检查是否在等待表单输入
+        if self.form_manager.is_waiting_for_input(user_id):
+            await self.handle_form_input(update, user_id, prompt)
+            return
         
         if user_id in self.waiting_for_negative_prompt:
             await self.handle_negative_prompt_input(update, user_id, prompt)
@@ -379,13 +591,19 @@ class TelegramBot:
         await self.generate_image_task(user_id, username, prompt, update.message)
     
     @safe_call
-    async def generate_image_task(self, user_id: str, username: str, prompt: str, message: Message) -> None:
+    async def generate_image_task(self, user_id: str, username: str, prompt: str, message: Message, from_form: bool = False) -> None:
         """生成图片任务"""
         task_id = str(uuid.uuid4())[:8]
         self.last_prompt = prompt  # 保存最后的提示词
         
         # 获取用户自定义设置
         user_settings = self.get_user_settings(user_id)
+        
+        # 如果是从表单生成，使用表单参数
+        if from_form:
+            generation_params = self.form_manager.generate_params_from_form(user_id, user_settings)
+        else:
+            generation_params = user_settings
         
         # 添加到安全管理器
         self.security.add_task(task_id, user_id, prompt)
@@ -400,24 +618,36 @@ class TelegramBot:
             TextContent.GENERATE_PROGRESS.format(
                 task_id=task_id,
                 prompt=prompt[:50] + ('...' if len(prompt) > 50 else ''),
-                resolution=f"{user_settings['width']}x{user_settings['height']}"
+                resolution=f"{generation_params['width']}x{generation_params['height']}"
             ),
             reply_markup=reply_markup
         )
         
-        # 调用SD API生成图片，使用用户设置
+        # 调用SD API生成图片，使用生成参数
         success, result = await self.sd_controller.generate_image(
             prompt, 
-            **user_settings  # 使用用户自定义设置
+            **generation_params
         )
         
         if success:
             reply_markup = Keyboards.like_keyboard(task_id)
             await progress_msg.edit_text(TextContent.GENERATE_SUCCESS)
-            caption = TextContent.GENERATE_CAPTION.format(
-                prompt=prompt,
-                resolution=f"{user_settings['width']}x{user_settings['height']}"
-            )
+            
+            # 构建标题，如果是表单生成则显示更多信息
+            if from_form:
+                form_data = self.form_manager.get_user_form(user_id)
+                seed_info = f"🎲 种子: {generation_params.get('seed', '随机')}"
+                hires_info = f"🔍 高清修复: {'开启' if form_data.get('hires_fix') else '关闭'}"
+                caption = TextContent.GENERATE_CAPTION.format(
+                    prompt=prompt,
+                    resolution=f"{generation_params['width']}x{generation_params['height']}"
+                ) + f"\n{seed_info}\n{hires_info}"
+            else:
+                caption = TextContent.GENERATE_CAPTION.format(
+                    prompt=prompt,
+                    resolution=f"{generation_params['width']}x{generation_params['height']}"
+                )
+            
             sent_msg = await message.reply_photo(
                 photo=result,
                 caption=caption,
