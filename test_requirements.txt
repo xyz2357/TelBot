@@ -1,0 +1,29 @@
+# basic test framework
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+
+# Mock and test tools
+unittest-xml-reporting==3.2.0
+coverage==7.3.2
+factory-boy==3.3.0
+
+# async test support
+aioresponses==0.7.4
+asynctest==0.13.0
+
+# test data generation
+faker==20.1.0
+
+# test report and analysis
+pytest-html==4.1.1
+pytest-xdist==3.5.0
+
+# code quality check
+flake8==6.1.0
+black==23.11.0
+mypy==1.7.1
+
+# security test
+bandit==1.7.5
