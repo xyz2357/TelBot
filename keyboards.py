@@ -49,6 +49,8 @@ class CallbackData(Enum):
     def form_set_resolution(res: str) -> str:
         return CallbackData.FORM_SET_RESOLUTION.value.format(res=res.replace('x', '_'))
 
+from typing import Dict
+
 class Keyboards:
     @staticmethod
     def main_menu() -> InlineKeyboardMarkup:
@@ -77,7 +79,7 @@ class Keyboards:
             ("1280x720", "宽屏 16:9"),
             ("720x1280", "竖屏 9:16")
         ]
-        keyboard = []
+        keyboard: list[list[InlineKeyboardButton]] = []
         for res_text, desc in resolutions:
             prefix = "✅ " if res_text == current_res else ""
             button_text = f"{prefix}{res_text} ({desc})"
@@ -124,7 +126,7 @@ class Keyboards:
 
     # 新增表单相关键盘
     @staticmethod
-    def advanced_form_menu(form_data: dict) -> InlineKeyboardMarkup:
+    def advanced_form_menu(form_data: Dict[str, object]) -> InlineKeyboardMarkup:
         """高级表单菜单"""
         prompt_text = f"✏️ 正面词: {'已设置' if form_data.get('prompt') else '未设置'}"
         resolution_text = f"📐 分辨率: {form_data.get('resolution', '未设置')}"
@@ -156,7 +158,7 @@ class Keyboards:
             ("512x512", "小尺寸"),
             ("768x768", "中等尺寸")
         ]
-        keyboard = []
+        keyboard: list[list[InlineKeyboardButton]] = []
         for res_text, desc in resolutions:
             prefix = "✅ " if res_text == current_res else ""
             button_text = f"{prefix}{res_text} ({desc})"

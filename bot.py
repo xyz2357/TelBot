@@ -1,9 +1,10 @@
 import logging
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, Any, Deque, Tuple
+from typing import Optional, Dict, Any, Deque, Tuple, Set, TypedDict, cast
+import io
 from collections import deque
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
+from telegram import Update, InlineKeyboardMarkup, Message, CallbackQuery
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from security import SecurityManager, require_auth
 from sd_controller import StableDiffusionController
@@ -27,10 +28,23 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+class SnapshotParams(TypedDict, total=False):
+    negative_prompt: str
+    seed: int
+    width: int
+    height: int
+    steps: int
+    cfg_scale: float
+    sampler_name: str
+
+class TaskSnapshot(TypedDict):
+    prompt: str
+    params: SnapshotParams
+
 class TelegramBot:
-    application: Optional[Application]
+    application: Optional[Any]
     last_prompt: Optional[str]
-    user_last_photo_msg: Dict[str, int] 
+    user_last_photo_msg: Dict[str, int]
     security: SecurityManager
     sd_controller: StableDiffusionController
     user_manager: UserManager
@@ -45,11 +59,11 @@ class TelegramBot:
         self.last_prompt = None
         self.user_last_photo_msg = {}
         # 记录任务ID与对应结果，供点赞保存使用，避免并发串任务
-        self.task_results: Dict[str, Any] = {}
+        self.task_results: Dict[str, Dict[str, Any]] = {}
         # 记录任务ID与生成参数（用于高清化复用原图参数）
-        self.task_params: Dict[str, Any] = {}
+        self.task_params: Dict[str, Dict[str, Any]] = {}
         # 每个任务的完整快照，便于复用与溯源
-        self.task_snapshots: Dict[str, Dict[str, Any]] = {}
+        self.task_snapshots: Dict[str, TaskSnapshot] = {}
         # 每个用户最近包含点赞按钮的图片消息 (最多10条)
         self.user_recent_photo_msgs: Dict[str, Deque[Tuple[int, int]]] = {}
 
@@ -58,15 +72,17 @@ class TelegramBot:
         try:
             if os.path.exists(self._snapshot_cache_file):
                 with open(self._snapshot_cache_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    # 仅接受 dict[str, dict]
-                    if isinstance(data, dict):
-                        # 限制大小
-                        items = list(data.items())[-Config.SNAPSHOT_CACHE_LIMIT:]
-                        self.task_snapshots = {k: v for k, v in items}
+                    raw = cast(Dict[str, Any], json.load(f))
+                    # 运行时校验结构
+                    snapshots: Dict[str, TaskSnapshot] = {}
+                    items: list[tuple[str, Any]] = list(raw.items())[-Config.SNAPSHOT_CACHE_LIMIT:]
+                    for k, v in items:
+                        if isinstance(v, dict) and 'prompt' in v and 'params' in v and isinstance(v['params'], dict):
+                            snapshots[str(k)] = cast(TaskSnapshot, v)
+                    self.task_snapshots = snapshots
         except Exception:
             pass
-        self.waiting_for_negative_prompt = set()
+        self.waiting_for_negative_prompt: Set[str] = set()
 
     # 下面的代码只做流程分发，具体逻辑交给 manager/controller
     def create_main_menu(self) -> InlineKeyboardMarkup:
@@ -76,7 +92,7 @@ class TelegramBot:
         return Keyboards.generation_menu()
 
     def create_resolution_menu(self, user_id: str) -> InlineKeyboardMarkup:
-        current_settings = self.user_manager.get_settings(user_id)
+        current_settings: UserSettings = self.user_manager.get_settings(user_id)
         current_res = f"{current_settings['width']}x{current_settings['height']}"
         return Keyboards.resolution_menu(current_res)
 
@@ -85,6 +101,8 @@ class TelegramBot:
 
     async def start(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         """开始命令处理"""
+        if update.effective_user is None or update.message is None:
+            return
         user = update.effective_user
         user_id: str = str(user.id)
         if not self.security.is_authorized_user(user_id):
@@ -103,11 +121,16 @@ class TelegramBot:
     @require_auth
     async def handle_callback(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         """处理回调按钮"""
-        query: CallbackQuery = update.callback_query
+        query = update.callback_query
+        if query is None:
+            return
         user_id: str = str(query.from_user.id)
         await query.answer()
         
-        data: CallbackData = query.data
+        data_opt = query.data
+        if data_opt is None:
+            return
+        data: str = data_opt
 
         if data.startswith(CallbackData.LIKE.value.split("{")[0]):
             # like_{task_id}
@@ -116,9 +139,13 @@ class TelegramBot:
             if result:
                 await self.sd_controller.save_result_locally(result)
             self.security.complete_task(task_id, "liked")
-            old_caption = query.message.caption or ""
-            new_caption = old_caption + TextContent.LIKED_CAPTION_APPEND
-            await query.edit_message_caption(new_caption, reply_markup=None)
+            if query.message is not None:
+                old_caption = (query.message.caption or "")
+                new_caption = old_caption + TextContent.LIKED_CAPTION_APPEND
+                try:
+                    await query.edit_message_caption(new_caption, reply_markup=None)
+                except Exception:
+                    pass
         elif data.startswith(CallbackData.ENHANCE_HR.value.split("{")[0]):
             # enhance_hr_{task_id}
             task_id = data.split("_", 2)[2]
@@ -139,7 +166,7 @@ class TelegramBot:
             )
         elif data == CallbackData.INPUT_PROMPT.value:
             # input_prompt
-            user_settings = self.get_user_settings(user_id)
+            user_settings: UserSettings = self.get_user_settings(user_id)
             await query.edit_message_text(
                 TextContent.INPUT_PROMPT.format(
                     resolution=f"{user_settings['width']}x{user_settings['height']}"
@@ -211,7 +238,7 @@ class TelegramBot:
     # 原有方法保持不变
     async def show_resolution_settings(self, query: CallbackQuery, user_id: str) -> None:
         """显示分辨率设置菜单"""
-        user_settings = self.get_user_settings(user_id)
+        user_settings: UserSettings = self.get_user_settings(user_id)
         current_res = f"{user_settings['width']}x{user_settings['height']}"
         text = TextContent.RESOLUTION_SETTINGS.format(resolution=current_res)
         await query.edit_message_text(
@@ -224,7 +251,7 @@ class TelegramBot:
         parts = callback_data.split("_")
         width = int(parts[2])
         height = int(parts[3])
-        user_settings = self.get_user_settings(user_id)
+        user_settings: UserSettings = self.get_user_settings(user_id)
         user_settings['width'] = width
         user_settings['height'] = height
         await query.edit_message_text(
@@ -270,7 +297,7 @@ class TelegramBot:
     async def show_sd_settings(self, query: CallbackQuery) -> None:
         """显示SD设置信息"""
         user_id: str = str(query.from_user.id)
-        user_settings = self.get_user_settings(user_id)
+        user_settings: UserSettings = self.get_user_settings(user_id)
         
         settings_text = TextContent.SD_SETTINGS.format(
             width=user_settings['width'],
@@ -311,7 +338,7 @@ class TelegramBot:
     
     async def show_negative_prompt_settings(self, query: CallbackQuery, user_id: str) -> None:
         """显示负面词设置菜单"""
-        user_settings = self.get_user_settings(user_id)
+        user_settings: UserSettings = self.get_user_settings(user_id)
         current_negative_prompt = user_settings['negative_prompt']
         
         # 截断显示长负面词
@@ -358,7 +385,8 @@ class TelegramBot:
         
         # 验证负面词长度
         if len(negative_prompt) > 1000:
-            await update.message.reply_text(TextContent.NEGATIVE_PROMPT_TOO_LONG)
+            if update.message is not None:
+                await update.message.reply_text(TextContent.NEGATIVE_PROMPT_TOO_LONG)
             return
         
         # 保存负面词
@@ -369,17 +397,18 @@ class TelegramBot:
         if len(display_negative_prompt) > 200:
             display_negative_prompt = display_negative_prompt[:200] + "..."
         
-        await update.message.reply_text(
-            TextContent.NEGATIVE_PROMPT_SET.format(negative_prompt=display_negative_prompt),
-            reply_markup=Keyboards.negative_prompt_menu()
-        )
+        if update.message is not None:
+            await update.message.reply_text(
+                TextContent.NEGATIVE_PROMPT_SET.format(negative_prompt=display_negative_prompt),
+                reply_markup=Keyboards.negative_prompt_menu()
+            )
 
     async def cancel_negative_prompt_input(self, query: CallbackQuery, user_id: str) -> None:
         """取消负面词输入"""
         self.waiting_for_negative_prompt.discard(user_id)  # 移除等待状态
         
         # 获取当前负面词设置并显示设置页面
-        user_settings = self.get_user_settings(user_id)
+        user_settings: UserSettings = self.get_user_settings(user_id)
         current_negative_prompt = user_settings['negative_prompt']
         
         # 截断显示长负面词
@@ -405,7 +434,7 @@ class TelegramBot:
         text = TextContent.ADVANCED_FORM_TITLE + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
         await query.edit_message_text(
             text,
-            reply_markup=Keyboards.advanced_form_menu(form_data)
+            reply_markup=Keyboards.advanced_form_menu(cast(Dict[str, object], form_data))
         )
 
     async def request_form_prompt_input(self, query: CallbackQuery, user_id: str) -> None:
@@ -419,12 +448,12 @@ class TelegramBot:
     async def show_form_resolution_menu(self, query: CallbackQuery, user_id: str) -> None:
         """显示表单分辨率选择菜单"""
         form_data = self.form_manager.get_user_form(user_id)
-        current_res = form_data.get('resolution', '')
+        current_res_val: str = (form_data.get('resolution') or "")
         
-        text = TextContent.FORM_RESOLUTION_MENU.format(current_resolution=current_res or "未设置")
+        text = TextContent.FORM_RESOLUTION_MENU.format(current_resolution=current_res_val or "未设置")
         await query.edit_message_text(
             text,
-            reply_markup=Keyboards.form_resolution_menu(current_res)
+            reply_markup=Keyboards.form_resolution_menu(current_res_val)
         )
 
     async def set_form_resolution(self, query: CallbackQuery, callback_data: str, user_id: str) -> None:
@@ -466,7 +495,7 @@ class TelegramBot:
         
         await query.edit_message_text(
             text,
-            reply_markup=Keyboards.advanced_form_menu(form_data)
+            reply_markup=Keyboards.advanced_form_menu(cast(Dict[str, object], form_data))
         )
 
     async def generate_from_form(self, query: CallbackQuery, user_id: str) -> None:
@@ -494,7 +523,7 @@ class TelegramBot:
         text = TextContent.FORM_RESET_SUCCESS + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
         await query.edit_message_text(
             text,
-            reply_markup=Keyboards.advanced_form_menu(form_data)
+            reply_markup=Keyboards.advanced_form_menu(cast(Dict[str, object], form_data))
         )
 
     async def cancel_form_input(self, query: CallbackQuery, user_id: str) -> None:
@@ -508,7 +537,7 @@ class TelegramBot:
         text = TextContent.FORM_INPUT_CANCELLED + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
         await query.edit_message_text(
             text,
-            reply_markup=Keyboards.advanced_form_menu(form_data)
+            reply_markup=Keyboards.advanced_form_menu(cast(Dict[str, object], form_data))
         )
 
     async def handle_form_input(self, update: Update, user_id: str, input_text: str) -> None:
@@ -537,9 +566,11 @@ class TelegramBot:
         summary = self.form_manager.format_form_summary(user_id)
         text = message + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
         
-        await update.message.reply_text(
+        if update.message is None:
+            return
+        await cast(Message, update.message).reply_text(
             text,
-            reply_markup=Keyboards.advanced_form_menu(form_data)
+            reply_markup=Keyboards.advanced_form_menu(cast(Dict[str, object], form_data))
         )
 
     async def handle_form_seed_input(self, update: Update, user_id: str, seed_text: str) -> None:
@@ -549,7 +580,8 @@ class TelegramBot:
         is_valid, seed_value, status = self.form_manager.validate_seed(seed_text)
         
         if not is_valid:
-            await update.message.reply_text(TextContent.FORM_SEED_INVALID)
+            if update.message is not None:
+                await update.message.reply_text(TextContent.FORM_SEED_INVALID)
             return
         
         self.form_manager.update_form_field(user_id, 'seed', seed_value)
@@ -566,9 +598,11 @@ class TelegramBot:
         summary = self.form_manager.format_form_summary(user_id)
         text = message + "\n\n" + TextContent.FORM_SUMMARY.format(**summary)
         
+        if update.message is None:
+            return
         await update.message.reply_text(
             text,
-            reply_markup=Keyboards.advanced_form_menu(form_data)
+            reply_markup=Keyboards.advanced_form_menu(cast(Dict[str, object], form_data))
         )
 
     @safe_call
@@ -576,7 +610,12 @@ class TelegramBot:
     async def handle_text_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """处理文本提示词"""
         
-        prompt: str = update.message.text.strip()
+        if update.message is None or update.effective_user is None:
+            return
+        text_val = update.message.text
+        if text_val is None:
+            return
+        prompt: str = text_val.strip()
         user_id: str = str(update.effective_user.id)
         username: str = update.effective_user.username or update.effective_user.first_name
         
@@ -640,16 +679,17 @@ class TelegramBot:
         self.last_prompt = prompt  # 保存最后的提示词
         
         # 获取用户自定义设置
-        user_settings = self.get_user_settings(user_id)
+        user_settings: UserSettings = self.get_user_settings(user_id)
         
         # 生成参数来源优先级：override_params > 表单参数 > 用户设置
+        generation_params: Dict[str, Any]
         if override_params is not None:
-            generation_params = user_settings.copy()
+            generation_params = dict(user_settings)
             generation_params.update(override_params)
         elif from_form:
             generation_params = self.form_manager.generate_params_from_form(user_id, user_settings)
         else:
-            generation_params = user_settings
+            generation_params = dict(user_settings)
         
         # 添加到安全管理器
         self.security.add_task(task_id, user_id, prompt)
@@ -694,9 +734,16 @@ class TelegramBot:
         updater_task = asyncio.create_task(progress_updater())
 
         # 调用SD API生成图片，使用生成参数
+        # 将 negative_prompt 单独取出以满足类型检查
+        neg_prompt_any = generation_params.get('negative_prompt')
+        neg_prompt: Optional[str] = neg_prompt_any if isinstance(neg_prompt_any, str) else None
+        rest_params = dict(generation_params)
+        if 'negative_prompt' in rest_params:
+            rest_params.pop('negative_prompt')
         success, result = await self.sd_controller.generate_image(
-            prompt, 
-            **generation_params
+            prompt,
+            neg_prompt,
+            **rest_params
         )
         
         if success:
@@ -718,7 +765,7 @@ class TelegramBot:
                     resolution=f"{generation_params['width']}x{generation_params['height']}"
                 )
             
-            image_bytes, api_result = result
+            image_bytes, api_result = cast(Tuple[io.BytesIO, Dict[str, Any]], result)
             # 记录任务结果
             self.task_results[task_id] = api_result
             self.task_params[task_id] = generation_params
@@ -754,7 +801,7 @@ class TelegramBot:
             reply_markup = Keyboards.like_keyboard(task_id, show_enhance=not is_hr_enabled)
             sent_msg = await message.reply_photo(
                 photo=image_bytes,
-                caption=caption,
+            caption=caption,
                 reply_markup=reply_markup
             )
             
@@ -790,9 +837,10 @@ class TelegramBot:
                         params_snapshot['seed'] = seed_val
                 except Exception:
                     pass
+            params_snapshot_t: SnapshotParams = cast(SnapshotParams, params_snapshot)
             self.task_snapshots[task_id] = {
                 'prompt': prompt,
-                'params': params_snapshot,
+                'params': params_snapshot_t,
             }
 
             # 写入磁盘缓存（仅保存最近 SNAPSHOT_CACHE_LIMIT 条）
@@ -804,7 +852,7 @@ class TelegramBot:
                     latest_items = list(self.task_snapshots.items())[-Config.SNAPSHOT_CACHE_LIMIT:]
                     self.task_snapshots = {k: v for k, v in latest_items}
                 with open(self._snapshot_cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(self.task_snapshots, f, ensure_ascii=False, indent=2)
+                    json.dump(cast(Dict[str, Any], self.task_snapshots), f, ensure_ascii=False, indent=2)
             except Exception:
                 pass
 
@@ -812,7 +860,7 @@ class TelegramBot:
             chat_id = message.chat_id
             dq = self.user_recent_photo_msgs.setdefault(user_id, deque())
             dq.append((chat_id, sent_msg.message_id))
-            if len(dq) > Config.LIKABLE_MESSAGE_LIMIT:
+            if len(dq) > Config.LIKABLE_MESSAGE_LIMIT and self.application is not None:
                 old_chat_id, old_msg_id = dq.popleft()
                 try:
                     await self.application.bot.edit_message_reply_markup(
@@ -849,7 +897,7 @@ class TelegramBot:
             await progress_msg.edit_text(TextContent.GENERATE_FAIL.format(error=result, prompt=prompt[:50]))
             
             # 记录失败日志
-            self.security.log_generation(user_id, username, prompt, False, result)
+            self.security.log_generation(user_id, username, prompt, False, str(result) if not isinstance(result, str) else result)
             self.security.complete_task(task_id, f"failed: {result}")
     
     @require_auth
@@ -881,20 +929,20 @@ class TelegramBot:
             return
 
         # 从快照参数出发，避免被用户此后改动影响
-        generation_params = snapshot['params'].copy()
+        generation_params_dict: Dict[str, Any] = dict(snapshot['params'])
         # 确保复用 seed
         if 'seed' in snapshot['params']:
-            generation_params['seed'] = snapshot['params']['seed']
+            generation_params_dict['seed'] = snapshot['params']['seed']
         # 强制高清修复（不依赖表单状态）
         h = Config.HIRES_DEFAULTS
-        generation_params['enable_hr'] = True
-        generation_params['hr_scale'] = h['hr_scale']
-        generation_params['hr_upscaler'] = h['hr_upscaler']
-        generation_params['denoising_strength'] = h['denoising_strength']
-        total_steps = int(generation_params.get('steps', 20) or 20)
-        generation_params['hr_second_pass_steps'] = max(1, int(total_steps * h['hr_second_pass_ratio']))
-        generation_params['hr_resize_x'] = h['hr_resize_x']
-        generation_params['hr_resize_y'] = h['hr_resize_y']
+        generation_params_dict['enable_hr'] = True
+        generation_params_dict['hr_scale'] = h['hr_scale']
+        generation_params_dict['hr_upscaler'] = h['hr_upscaler']
+        generation_params_dict['denoising_strength'] = h['denoising_strength']
+        total_steps = int(generation_params_dict.get('steps', 20) or 20)
+        generation_params_dict['hr_second_pass_steps'] = max(1, int(total_steps * h['hr_second_pass_ratio']))
+        generation_params_dict['hr_resize_x'] = h['hr_resize_x']
+        generation_params_dict['hr_resize_y'] = h['hr_resize_y']
 
         # 复用快照中的原始提示词
         original_prompt = snapshot.get('prompt') or self.last_prompt or ""
@@ -911,7 +959,7 @@ class TelegramBot:
             original_prompt,
             query.message,
             from_form=False,
-            override_params=generation_params,
+            override_params=generation_params_dict,
         )
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -1,5 +1,5 @@
-from typing import Dict, Optional
-from config import FormData, Config
+from typing import Dict, Optional, Union, List, Any, Tuple
+from config import FormData, Config, UserSettings
 import random
 
 class FormManager:
@@ -20,7 +20,7 @@ class FormManager:
         self.user_forms[user_id] = Config.DEFAULT_FORM_DATA.copy()
         self.clear_input_state(user_id)
     
-    def update_form_field(self, user_id: str, field: str, value) -> None:
+    def update_form_field(self, user_id: str, field: str, value: Union[str, int, bool, None]) -> None:
         """更新表单字段"""
         form_data = self.get_user_form(user_id)
         form_data[field] = value
@@ -42,7 +42,7 @@ class FormManager:
         """检查用户是否在等待输入"""
         return user_id in self.form_input_states
     
-    def format_form_summary(self, user_id: str) -> str:
+    def format_form_summary(self, user_id: str) -> Dict[str, str]:
         """格式化表单摘要显示"""
         form_data = self.get_user_form(user_id)
         
@@ -61,7 +61,7 @@ class FormManager:
             'hires_fix': hires_display
         }
     
-    def validate_seed(self, seed_text: str) -> tuple[bool, Optional[int], str]:
+    def validate_seed(self, seed_text: str) -> Tuple[bool, Optional[int], str]:
         """验证种子输入"""
         seed_text = seed_text.strip().lower()
         
@@ -79,10 +79,10 @@ class FormManager:
             except ValueError:
                 return False, None, "无效格式"
     
-    def generate_params_from_form(self, user_id: str, user_settings: dict) -> dict:
+    def generate_params_from_form(self, user_id: str, user_settings: UserSettings) -> Dict[str, Any]:
         """从表单生成API参数"""
         form_data = self.get_user_form(user_id)
-        params = user_settings.copy()
+        params: Dict[str, Any] = dict(user_settings)
         
         # 处理分辨率
         if form_data.get('resolution'):
@@ -117,7 +117,7 @@ class FormManager:
         
         return params
     
-    def get_prompt_from_form(self, user_id: str, random_prompts: list) -> str:
+    def get_prompt_from_form(self, user_id: str, random_prompts: List[str]) -> str:
         """从表单获取提示词，如果未设置则使用随机提示词"""
         form_data = self.get_user_form(user_id)
         prompt = form_data.get('prompt')

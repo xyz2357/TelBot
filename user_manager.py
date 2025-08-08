@@ -23,9 +23,10 @@ class UserManager:
                     saved_settings = json.load(f)
                     # 合并默认参数和保存的设置
                     for user_id, settings in saved_settings.items():
-                        user_settings = self.default_params.copy()
-                        user_settings.update(settings)
-                        self.user_settings[user_id] = user_settings
+                        merged: UserSettings = self.default_params.copy()
+                        if isinstance(settings, dict):
+                            merged.update(settings)  # type: ignore[arg-type]
+                        self.user_settings[user_id] = merged
                 print(f"✅ 已加载 {len(self.user_settings)} 个用户的设置")
         except Exception as e:
             print(f"⚠️ 加载用户设置失败: {e}")

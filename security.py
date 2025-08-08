@@ -17,7 +17,7 @@ class GenerationRecord(TypedDict):
     username: str
     prompt: str
     success: bool
-    error: str
+    error: Optional[str]
     timestamp: float
 
 class SecurityManager:
@@ -37,7 +37,7 @@ class SecurityManager:
         """检查用户是否被授权"""
         return user_id in self.authorized_users
     
-    def is_safe_prompt(self, prompt):
+    def is_safe_prompt(self, prompt: str) -> Tuple[bool, str]:
         """检查提示词是否安全"""
         prompt_lower = prompt.lower()
         
@@ -56,7 +56,7 @@ class SecurityManager:
         
         return True, "安全"
     
-    def check_generation_limit(self, user_id: str, limit=3, window=300) -> Tuple[bool, str]:
+    def check_generation_limit(self, user_id: str, limit: int = 3, window: int = 300) -> Tuple[bool, str]:
         return True, "通过"
         # """检查用户生图频率限制 (5分钟内最多3张)"""
         # now = time.time()
@@ -81,18 +81,21 @@ class SecurityManager:
             self.rate_limits[user_id] = []
         self.rate_limits[user_id].append(now)
     
-    def get_queue_size(self):
+    def get_queue_size(self) -> int:
         """获取当前队列大小"""
         return len([task for task in self.active_tasks.values() if not task.get('completed', False)])
     
     def add_task(self, task_id: str, user_id: str, prompt: str) -> None:
         """添加任务到队列"""
-        self.active_tasks[task_id] = {
+        task: Task = {
             'user_id': user_id,
             'prompt': prompt,
             'start_time': time.time(),
-            'completed': False
+            'completed': False,
+            'end_time': None,
+            'result': None,
         }
+        self.active_tasks[task_id] = task
     
     def complete_task(self, task_id: str, status: str) -> None:
         """标记任务完成"""
@@ -103,24 +106,27 @@ class SecurityManager:
     
     def log_generation(self, user_id: str, username: str, prompt: str, success: bool, error: Optional[str] = None) -> GenerationRecord:
         """记录生图日志"""
-        log_entry = {
+        log_entry: GenerationRecord = {
             'timestamp': time.time(),
             'user_id': user_id,
             'username': username,
             'prompt': prompt[:100] + '...' if len(prompt) > 100 else prompt,
             'success': success,
-            'error': error
+            'error': error or None
         }
         self.generation_history.append(log_entry)
         
         # 保持最近50条记录
         if len(self.generation_history) > 50:
             self.generation_history = self.generation_history[-50:]
+        return log_entry
 
-def require_auth(func):
+from typing import Callable, Awaitable
+
+def require_auth(func: Callable[..., Awaitable[None]]):
     """认证装饰器"""
     @wraps(func)
-    async def wrapper(self, update, context):
+    async def wrapper(self, update: Any, context: Any) -> Optional[None]:
         user_id = str(update.effective_user.id)  # 强制为str
         if not self.security.is_authorized_user(user_id):
             try:
@@ -130,6 +136,7 @@ def require_auth(func):
                     await update.message.reply_text("❌ 未授权访问")
             except Exception:
                 pass
-            return
-        return await func(self, update, context)
+            return None
+        await func(self, update, context)
+        return None
     return wrapper

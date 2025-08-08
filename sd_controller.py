@@ -46,7 +46,7 @@ class StableDiffusionController:
                         models = await response.json()
                         return [model['title'] for model in models]
                     return []
-        except Exception as e:
+        except Exception:
             return []
 
     async def get_current_model(self) -> str:
@@ -76,7 +76,7 @@ class StableDiffusionController:
                         samplers = await response.json()
                         return [sampler['name'] for sampler in samplers]
                     return []
-        except Exception as e:
+        except Exception:
             return []
 
     async def generate_image(
