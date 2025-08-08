@@ -1,0 +1,48 @@
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r test_requirements.txt
+          # 兜底：确保有 pytest-cov / coverage
+          pip install pytest pytest-cov coverage
+
+      - name: Run tests with coverage (show missing lines)
+        run: |
+          mkdir -p reports
+          # 在控制台显示未覆盖行号
+          pytest --maxfail=1 -q \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report=xml:reports/coverage.xml \
+            --cov-report=html:htmlcov
+
+      # 可选：把 HTML 覆盖率报告上传为构件，方便下载查看
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: htmlcov
+          path: htmlcov
+          if-no-files-found: ignore
+
+      # 原来的 Codecov 步骤：已注释
+      # - name: Upload coverage
+      #   uses: codecov/codecov-action@v1
+      #   with:
+      #     file: ./reports/coverage.xml
+      #     # token: ${{ secrets.CODECOV_TOKEN }}
