@@ -84,7 +84,7 @@ class StableDiffusionController:
         prompt: str,
         negative_prompt: Optional[str] = None,
         **params: Any
-    ) -> Tuple[bool, Union[io.BytesIO, str]]:
+    ) -> Tuple[bool, Union[Tuple[io.BytesIO, Dict[str, Any]], str]]:
         """生成图片"""
         generation_params: Dict[str, Any] = Config.SD_DEFAULT_PARAMS.copy()
         generation_params.update(params)
@@ -108,7 +108,7 @@ class StableDiffusionController:
                             image.save(img_bytes, format='PNG')
                             img_bytes.seek(0)
                             self.last_result = result
-                            return True, img_bytes
+                            return True, (img_bytes, result)
                         else:
                             return False, "未生成图片"
                     else:
@@ -126,6 +126,8 @@ class StableDiffusionController:
             image_data = base64.b64decode(self.last_result['images'][0])
             image = Image.open(io.BytesIO(image_data))
             save_dir: str = Config.LOCAL_SAVE_PATH
+            if not os.path.isabs(save_dir):
+                save_dir = os.path.join(Config.DATA_DIR, save_dir)
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
             timestamp: str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -133,8 +135,43 @@ class StableDiffusionController:
             filepath: str = os.path.join(save_dir, filename)
             metadata: PngInfo = PngInfo()
             if api_info and isinstance(api_info, str) and api_info.strip():
-                parameters_text = json.loads(api_info).get('infotexts', [''])[0]
-                metadata.add_text("parameters", parameters_text)
+                try:
+                    parameters_text = json.loads(api_info).get('infotexts', [''])[0]
+                except Exception:
+                    parameters_text = api_info
+                if parameters_text:
+                    metadata.add_text("parameters", parameters_text)
+            image.save(filepath, 'PNG', pnginfo=metadata)
+            print(f"图片已保存: {filepath}")
+            return filepath
+        except Exception as e:
+            print(f"保存图片到本地失败: {e}")
+            return None
+
+    async def save_result_locally(self, result: Dict[str, Any]) -> Optional[str]:
+        """根据传入的 SD 结果保存图片（包含 metadata），避免使用全局 last_result。"""
+        try:
+            api_info = result.get('info', None)
+            if not result.get('images'):
+                return None
+            image_data = base64.b64decode(result['images'][0])
+            image = Image.open(io.BytesIO(image_data))
+            save_dir: str = Config.LOCAL_SAVE_PATH
+            if not os.path.isabs(save_dir):
+                save_dir = os.path.join(Config.DATA_DIR, save_dir)
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+            timestamp: str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename: str = f"{timestamp}.png"
+            filepath: str = os.path.join(save_dir, filename)
+            metadata: PngInfo = PngInfo()
+            if api_info and isinstance(api_info, str) and api_info.strip():
+                try:
+                    parameters_text = json.loads(api_info).get('infotexts', [''])[0]
+                except Exception:
+                    parameters_text = api_info
+                if parameters_text:
+                    metadata.add_text("parameters", parameters_text)
             image.save(filepath, 'PNG', pnginfo=metadata)
             print(f"图片已保存: {filepath}")
             return filepath
@@ -162,3 +199,20 @@ class StableDiffusionController:
                     return 0, 0
         except Exception:
             return 0, 0
+
+    async def enhance_with_hr(self, original_result: Dict[str, Any]) -> Tuple[bool, Union[Tuple[io.BytesIO, Dict[str, Any]], str]]:
+        """基于已有 txt2img 结果，复用原参数并启用高清修复后再次生成。"""
+        try:
+            info_text = original_result.get('info')
+            if isinstance(info_text, str):
+                try:
+                    infotexts = json.loads(info_text).get('infotexts', [])
+                except Exception:
+                    infotexts = []
+            else:
+                infotexts = []
+            # 无法稳定从 infotexts 解析所有参数，回退仅复用 prompt/negative_prompt，由上层传入 hr 参数
+            # 这里直接返回失败，让上层使用已有 user_settings + hr 覆盖后再次 generate_image
+            return False, "需要上层传入参数以启用高清化"
+        except Exception as e:
+            return False, f"解析原结果失败: {e}"

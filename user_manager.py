@@ -1,7 +1,7 @@
 import json
 import os
 from typing import Dict
-from config import UserSettings
+from config import UserSettings, Config
 
 class UserManager:
     user_settings: Dict[str, UserSettings]
@@ -10,7 +10,9 @@ class UserManager:
     def __init__(self, default_params: UserSettings) -> None:
         self.user_settings = {}
         self.default_params = default_params
-        self.settings_file = "user_settings.json"
+        # 将用户设置集中保存在 data 目录中
+        os.makedirs(Config.DATA_DIR, exist_ok=True)
+        self.settings_file = os.path.join(Config.DATA_DIR, "user_settings.json")
         self.load_settings()
 
     def load_settings(self) -> None:

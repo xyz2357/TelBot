@@ -41,7 +41,7 @@ pip install -r requirements.txt
 复制示例配置文件并编辑：
 
 ```bash
-cp .env.sample .env
+cp .env.example .env
 ```
 
 编辑 `.env` 文件：

@@ -13,6 +13,7 @@ class CallbackData(Enum):
     MAIN_MENU = "main_menu"
     INTERRUPT = "interrupt_{task_id}"
     LIKE = "like_{task_id}"
+    ENHANCE_HR = "enhance_hr_{task_id}"
     SET_RESOLUTION = "set_resolution_{res}"
     SET_NEGATIVE_PROMPT = "set_negative_prompt"
     RESET_NEGATIVE_PROMPT = "reset_negative_prompt"
@@ -26,6 +27,7 @@ class CallbackData(Enum):
     FORM_GENERATE = "form_generate"
     FORM_RESET = "form_reset"
     FORM_CANCEL_INPUT = "form_cancel_input"
+    FORM_SET_RESOLUTION_MENU = "form_set_resolution_menu"
 
     @staticmethod
     def interrupt(task_id: str) -> str:
@@ -34,6 +36,10 @@ class CallbackData(Enum):
     @staticmethod
     def like(task_id: str) -> str:
         return CallbackData.LIKE.value.format(task_id=task_id)
+
+    @staticmethod
+    def enhance_hr(task_id: str) -> str:
+        return CallbackData.ENHANCE_HR.value.format(task_id=task_id)
 
     @staticmethod
     def set_resolution(res: str) -> str:
@@ -110,10 +116,11 @@ class Keyboards:
         ])
 
     @staticmethod
-    def like_keyboard(task_id: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("👍 点赞并保存", callback_data=CallbackData.like(task_id))]
-        ])
+    def like_keyboard(task_id: str, show_enhance: bool = True) -> InlineKeyboardMarkup:
+        row = [InlineKeyboardButton("👍 点赞并保存", callback_data=CallbackData.like(task_id))]
+        if show_enhance:
+            row.append(InlineKeyboardButton("✨ 高清化", callback_data=CallbackData.enhance_hr(task_id)))
+        return InlineKeyboardMarkup([row])
 
     # 新增表单相关键盘
     @staticmethod
@@ -126,7 +133,7 @@ class Keyboards:
         
         keyboard = [
             [InlineKeyboardButton(prompt_text, callback_data=CallbackData.FORM_SET_PROMPT.value)],
-            [InlineKeyboardButton(resolution_text, callback_data=CallbackData.FORM_SET_RESOLUTION.value.split('_')[0] + "_" + CallbackData.FORM_SET_RESOLUTION.value.split('_')[1] + "_" + "menu")],
+            [InlineKeyboardButton(resolution_text, callback_data=CallbackData.FORM_SET_RESOLUTION_MENU.value)],
             [InlineKeyboardButton(seed_text, callback_data=CallbackData.FORM_SET_SEED.value)],
             [InlineKeyboardButton(hires_text, callback_data=CallbackData.FORM_TOGGLE_HIRES.value)],
             [InlineKeyboardButton("🚀 生成图片", callback_data=CallbackData.FORM_GENERATE.value)],

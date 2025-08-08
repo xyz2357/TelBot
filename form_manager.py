@@ -100,12 +100,20 @@ class FormManager:
             # 生成随机种子
             params['seed'] = random.randint(0, 4294967295)
         
-        # 高清修复 (目前仅作为参数传递，实际功能留空)
+        # 高清修复参数映射
         if form_data.get('hires_fix'):
-            # 这里可以添加高清修复的参数，目前留空
-            # params['enable_hr'] = True
-            # params['hr_scale'] = 2.0
-            pass
+            h = Config.HIRES_DEFAULTS
+            params['enable_hr'] = True
+            params['hr_scale'] = h['hr_scale']
+            params['hr_upscaler'] = h['hr_upscaler']
+            # 避免 None 值导致 WebUI 后端比较报错
+            params['denoising_strength'] = h['denoising_strength']
+            # 二次采样步数：基于比例计算，至少 1
+            total_steps = int(params.get('steps', 20) or 20)
+            params['hr_second_pass_steps'] = max(1, int(total_steps * h['hr_second_pass_ratio']))
+            # 不使用像素尺寸重设时明确给 0
+            params['hr_resize_x'] = h['hr_resize_x']
+            params['hr_resize_y'] = h['hr_resize_y']
         
         return params
     

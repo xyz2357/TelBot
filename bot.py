@@ -1,7 +1,8 @@
 import logging
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Deque, Tuple
+from collections import deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from security import SecurityManager, require_auth
@@ -9,10 +10,14 @@ from sd_controller import StableDiffusionController
 from config import Config, UserSettings
 from keyboards import Keyboards, CallbackData
 from user_manager import UserManager
-from view_manager import ViewManager
+# from view_manager import ViewManager  # 当前未使用，保留以备后续扩展
 from form_manager import FormManager
 from utils import safe_call
 from text_content import TextContent
+import asyncio
+import json
+import os
+import re
 
 
 logging.basicConfig(
@@ -39,6 +44,28 @@ class TelegramBot:
         self.application = None
         self.last_prompt = None
         self.user_last_photo_msg = {}
+        # 记录任务ID与对应结果，供点赞保存使用，避免并发串任务
+        self.task_results: Dict[str, Any] = {}
+        # 记录任务ID与生成参数（用于高清化复用原图参数）
+        self.task_params: Dict[str, Any] = {}
+        # 每个任务的完整快照，便于复用与溯源
+        self.task_snapshots: Dict[str, Dict[str, Any]] = {}
+        # 每个用户最近包含点赞按钮的图片消息 (最多10条)
+        self.user_recent_photo_msgs: Dict[str, Deque[Tuple[int, int]]] = {}
+
+        # 在启动时加载快照缓存
+        self._snapshot_cache_file = os.path.join(Config.DATA_DIR, 'snapshots.json')
+        try:
+            if os.path.exists(self._snapshot_cache_file):
+                with open(self._snapshot_cache_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # 仅接受 dict[str, dict]
+                    if isinstance(data, dict):
+                        # 限制大小
+                        items = list(data.items())[-Config.SNAPSHOT_CACHE_LIMIT:]
+                        self.task_snapshots = {k: v for k, v in items}
+        except Exception:
+            pass
         self.waiting_for_negative_prompt = set()
 
     # 下面的代码只做流程分发，具体逻辑交给 manager/controller
@@ -85,11 +112,17 @@ class TelegramBot:
         if data.startswith(CallbackData.LIKE.value.split("{")[0]):
             # like_{task_id}
             task_id = data.split("_", 1)[1]
-            await self.sd_controller.save_last_result_locally()
+            result = self.task_results.get(task_id)
+            if result:
+                await self.sd_controller.save_result_locally(result)
             self.security.complete_task(task_id, "liked")
             old_caption = query.message.caption or ""
             new_caption = old_caption + TextContent.LIKED_CAPTION_APPEND
             await query.edit_message_caption(new_caption, reply_markup=None)
+        elif data.startswith(CallbackData.ENHANCE_HR.value.split("{")[0]):
+            # enhance_hr_{task_id}
+            task_id = data.split("_", 2)[2]
+            await self.enhance_image_hr(query, user_id, task_id)
         elif data == CallbackData.MAIN_MENU.value:
             # main_menu
             sd_status = await self.sd_controller.check_api_status()
@@ -153,10 +186,10 @@ class TelegramBot:
         elif data == CallbackData.FORM_SET_PROMPT.value:
             # form_set_prompt
             await self.request_form_prompt_input(query, user_id)
-        elif data == "form_set_resolution_menu":
+        elif data == CallbackData.FORM_SET_RESOLUTION_MENU.value:
             # form_set_resolution_menu
             await self.show_form_resolution_menu(query, user_id)
-        elif data.startswith("form_set_resolution_"):
+        elif data.startswith(CallbackData.FORM_SET_RESOLUTION.value.split("{")[0]):
             # form_set_resolution_{res}
             await self.set_form_resolution(query, data, user_id)
         elif data == CallbackData.FORM_SET_SEED.value:
@@ -556,20 +589,30 @@ class TelegramBot:
             await self.handle_negative_prompt_input(update, user_id, prompt)
             return
 
-        # 清理上次生成消息的按钮
-        last_msg_id = self.user_last_photo_msg.get(user_id)
-        if last_msg_id:
-            try:
-                await context.bot.edit_message_reply_markup(
-                    chat_id=update.message.chat_id,
-                    message_id=last_msg_id,
-                    reply_markup=None
-                )
-            except Exception:
-                pass  # 忽略可能的错误
+        # 不再清理上一条消息的按钮，改为保留最近10条的点赞按钮，超出时再移除旧的
 
         if prompt.startswith('/'):
             return  # 忽略命令
+
+        # 仅输入数字：重复执行“重新生成上一个提示词”的功能，次数限制在配置上限
+        if prompt.isdigit():
+            n = int(prompt)
+            n = max(1, min(n, Config.REGENERATE_MAX_RUNS))
+            if self.last_prompt is None:
+                await update.message.reply_text(TextContent.NO_LAST_PROMPT)
+                return
+            for _ in range(n):
+                # 队列限制检查
+                if self.security.get_queue_size() >= Config.MAX_QUEUE_SIZE:
+                    await update.message.reply_text(TextContent.QUEUE_FULL)
+                    break
+                # 频控
+                limit, limit_msg = self.security.check_generation_limit(user_id)
+                if not limit:
+                    await update.message.reply_text(limit_msg + "\n\n")
+                    break
+                await self.generate_image_task(user_id, username, self.last_prompt, update.message)
+            return
         
         # 安全检查
         safe, safety_msg = self.security.is_safe_prompt(prompt)
@@ -591,7 +634,7 @@ class TelegramBot:
         await self.generate_image_task(user_id, username, prompt, update.message)
     
     @safe_call
-    async def generate_image_task(self, user_id: str, username: str, prompt: str, message: Message, from_form: bool = False) -> None:
+    async def generate_image_task(self, user_id: str, username: str, prompt: str, message: Message, from_form: bool = False, override_params: Optional[Dict[str, Any]] = None) -> None:
         """生成图片任务"""
         task_id = str(uuid.uuid4())[:8]
         self.last_prompt = prompt  # 保存最后的提示词
@@ -599,8 +642,11 @@ class TelegramBot:
         # 获取用户自定义设置
         user_settings = self.get_user_settings(user_id)
         
-        # 如果是从表单生成，使用表单参数
-        if from_form:
+        # 生成参数来源优先级：override_params > 表单参数 > 用户设置
+        if override_params is not None:
+            generation_params = user_settings.copy()
+            generation_params.update(override_params)
+        elif from_form:
             generation_params = self.form_manager.generate_params_from_form(user_id, user_settings)
         else:
             generation_params = user_settings
@@ -623,6 +669,30 @@ class TelegramBot:
             reply_markup=reply_markup
         )
         
+        # 启动一个后台协程定期刷新进度
+        progress_running = True
+        async def progress_updater():
+            try:
+                while progress_running:
+                    progress, eta = await self.sd_controller.get_progress()
+                    try:
+                        eta_text = TextContent.ETA_TEXT.format(eta=eta) if eta > 0 else ""
+                        await progress_msg.edit_text(
+                            TextContent.GENERATE_PROGRESS.format(
+                                task_id=task_id,
+                                prompt=prompt[:50] + ('...' if len(prompt) > 50 else ''),
+                                resolution=f"{generation_params['width']}x{generation_params['height']}"
+                            ) + ("\n" + eta_text if eta_text else ""),
+                            reply_markup=reply_markup
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2)
+            except Exception:
+                pass
+
+        updater_task = asyncio.create_task(progress_updater())
+
         # 调用SD API生成图片，使用生成参数
         success, result = await self.sd_controller.generate_image(
             prompt, 
@@ -648,14 +718,117 @@ class TelegramBot:
                     resolution=f"{generation_params['width']}x{generation_params['height']}"
                 )
             
+            image_bytes, api_result = result
+            # 记录任务结果
+            self.task_results[task_id] = api_result
+            self.task_params[task_id] = generation_params
+            # 从返回的 info 中尽力解析 seed（若本次未显式指定）
+            if 'seed' not in generation_params:
+                try:
+                    raw_info = api_result.get('info')
+                    seed_val = None
+                    if isinstance(raw_info, str) and raw_info.strip():
+                        try:
+                            info_obj = json.loads(raw_info)
+                            if isinstance(info_obj, dict):
+                                seeds = info_obj.get('all_seeds')
+                                if isinstance(seeds, list) and len(seeds) > 0:
+                                    seed_val = int(seeds[0])
+                                elif 'seed' in info_obj and info_obj['seed'] is not None:
+                                    seed_val = int(info_obj['seed'])
+                                elif 'infotexts' in info_obj and info_obj['infotexts']:
+                                    text_meta = info_obj['infotexts'][0]
+                                    m = re.search(r"Seed:\s*(\d+)", text_meta)
+                                    if m:
+                                        seed_val = int(m.group(1))
+                        except Exception:
+                            m = re.search(r"Seed:\s*(\d+)", raw_info)
+                            if m:
+                                seed_val = int(m.group(1))
+                    if seed_val is not None:
+                        generation_params['seed'] = seed_val
+                except Exception:
+                    pass
+            # 判断是否本次已启用高清修复
+            is_hr_enabled = bool(generation_params.get('enable_hr'))
+            reply_markup = Keyboards.like_keyboard(task_id, show_enhance=not is_hr_enabled)
             sent_msg = await message.reply_photo(
-                photo=result,
+                photo=image_bytes,
                 caption=caption,
                 reply_markup=reply_markup
             )
             
             self.user_last_photo_msg[user_id] = sent_msg.message_id
 
+            # 快照：仅保存对 SD 生成有用的参数（可复用）
+            base_keys = ['negative_prompt', 'seed', 'width', 'height', 'steps', 'cfg_scale', 'sampler_name']
+            # 确保 seed 存在：若用户没显式设置，尝试从 api_result 中解析
+            params_snapshot = {k: generation_params[k] for k in base_keys if k in generation_params}
+            if 'seed' not in params_snapshot:
+                try:
+                    raw_info = api_result.get('info')
+                    seed_val = None
+                    if isinstance(raw_info, str) and raw_info.strip():
+                        try:
+                            info_obj = json.loads(raw_info)
+                            if isinstance(info_obj, dict):
+                                seeds = info_obj.get('all_seeds')
+                                if isinstance(seeds, list) and len(seeds) > 0:
+                                    seed_val = int(seeds[0])
+                                elif 'seed' in info_obj and info_obj['seed'] is not None:
+                                    seed_val = int(info_obj['seed'])
+                                elif 'infotexts' in info_obj and info_obj['infotexts']:
+                                    text_meta = info_obj['infotexts'][0]
+                                    m = re.search(r"Seed:\s*(\d+)", text_meta)
+                                    if m:
+                                        seed_val = int(m.group(1))
+                        except Exception:
+                            m = re.search(r"Seed:\s*(\d+)", raw_info)
+                            if m:
+                                seed_val = int(m.group(1))
+                    if seed_val is not None:
+                        params_snapshot['seed'] = seed_val
+                except Exception:
+                    pass
+            self.task_snapshots[task_id] = {
+                'prompt': prompt,
+                'params': params_snapshot,
+            }
+
+            # 写入磁盘缓存（仅保存最近 SNAPSHOT_CACHE_LIMIT 条）
+            try:
+                os.makedirs(Config.DATA_DIR, exist_ok=True)
+                # 裁剪
+                if len(self.task_snapshots) > Config.SNAPSHOT_CACHE_LIMIT:
+                    # 保留最新的 N 条
+                    latest_items = list(self.task_snapshots.items())[-Config.SNAPSHOT_CACHE_LIMIT:]
+                    self.task_snapshots = {k: v for k, v in latest_items}
+                with open(self._snapshot_cache_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.task_snapshots, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+            # 维护最近10条带点赞按钮的图片消息
+            chat_id = message.chat_id
+            dq = self.user_recent_photo_msgs.setdefault(user_id, deque())
+            dq.append((chat_id, sent_msg.message_id))
+            if len(dq) > Config.LIKABLE_MESSAGE_LIMIT:
+                old_chat_id, old_msg_id = dq.popleft()
+                try:
+                    await self.application.bot.edit_message_reply_markup(
+                        chat_id=old_chat_id,
+                        message_id=old_msg_id,
+                        reply_markup=None
+                    )
+                except Exception:
+                    pass
+
+            # 结束进度刷新
+            progress_running = False
+            try:
+                await updater_task
+            except Exception:
+                pass
             # 清理进度消息
             try:
                 await progress_msg.delete()
@@ -668,6 +841,11 @@ class TelegramBot:
             
         else:
             # 生成失败
+            progress_running = False
+            try:
+                await updater_task
+            except Exception:
+                pass
             await progress_msg.edit_text(TextContent.GENERATE_FAIL.format(error=result, prompt=prompt[:50]))
             
             # 记录失败日志
@@ -694,6 +872,47 @@ class TelegramBot:
             await query.edit_message_text(TextContent.INTERRUPT_SUCCESS.format(task_id=task_id))
         else:
             await query.edit_message_text(TextContent.INTERRUPT_FAIL.format(task_id=task_id))
+
+    async def enhance_image_hr(self, query: CallbackQuery, user_id: str, task_id: str) -> None:
+        """基于快照参数，启用高清修复重新生成。"""
+        snapshot = self.task_snapshots.get(task_id)
+        if not snapshot:
+            await query.answer("找不到该任务的参数，无法高清化", show_alert=True)
+            return
+
+        # 从快照参数出发，避免被用户此后改动影响
+        generation_params = snapshot['params'].copy()
+        # 确保复用 seed
+        if 'seed' in snapshot['params']:
+            generation_params['seed'] = snapshot['params']['seed']
+        # 强制高清修复（不依赖表单状态）
+        h = Config.HIRES_DEFAULTS
+        generation_params['enable_hr'] = True
+        generation_params['hr_scale'] = h['hr_scale']
+        generation_params['hr_upscaler'] = h['hr_upscaler']
+        generation_params['denoising_strength'] = h['denoising_strength']
+        total_steps = int(generation_params.get('steps', 20) or 20)
+        generation_params['hr_second_pass_steps'] = max(1, int(total_steps * h['hr_second_pass_ratio']))
+        generation_params['hr_resize_x'] = h['hr_resize_x']
+        generation_params['hr_resize_y'] = h['hr_resize_y']
+
+        # 复用快照中的原始提示词
+        original_prompt = snapshot.get('prompt') or self.last_prompt or ""
+        try:
+            await query.edit_message_text("✨ 正在对图片进行高清化...")
+        except Exception:
+            # 可能因为原消息是图片没有文本，无法 edit_text，退化为发送一条新进度消息
+            await query.message.reply_text("✨ 正在对图片进行高清化...")
+
+        # 直接发起新任务（使用当前消息作为 message 容器），并覆盖参数为快照参数 + 强制高清修复
+        await self.generate_image_task(
+            user_id,
+            query.from_user.username or query.from_user.first_name,
+            original_prompt,
+            query.message,
+            from_form=False,
+            override_params=generation_params,
+        )
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """帮助命令"""

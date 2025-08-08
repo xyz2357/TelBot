@@ -23,15 +23,15 @@ class GenerationRecord(TypedDict):
 class SecurityManager:
     authorized_users: List[str]
     generation_history: List[GenerationRecord]
-    tasks: Task
+    tasks: Dict[str, Task]
 
     def __init__(self) -> None:
         # 从配置加载授权用户ID（确保为str类型列表）
         self.authorized_users = getattr(Config, "AUTHORIZED_USERS", [])
         self.generation_history = []
         self.tasks = {}
-        self.rate_limits = {}
-        self.active_tasks: Task = {}  # 跟踪活跃任务
+        self.rate_limits: Dict[str, List[float]] = {}
+        self.active_tasks: Dict[str, Task] = {}  # 跟踪活跃任务
     
     def is_authorized_user(self, user_id: str) -> bool:
         """检查用户是否被授权"""
@@ -123,7 +123,13 @@ def require_auth(func):
     async def wrapper(self, update, context):
         user_id = str(update.effective_user.id)  # 强制为str
         if not self.security.is_authorized_user(user_id):
-            await update.message.reply_text("❌ 未授权访问")
+            try:
+                if getattr(update, "callback_query", None):
+                    await update.callback_query.answer("❌ 未授权访问", show_alert=True)
+                elif getattr(update, "message", None):
+                    await update.message.reply_text("❌ 未授权访问")
+            except Exception:
+                pass
             return
         return await func(self, update, context)
     return wrapper
