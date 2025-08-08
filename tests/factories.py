@@ -324,8 +324,8 @@ class MockHelper:
         file_mock = Mock()
         file_mock.read.return_value = content
         file_mock.write = Mock()
-        file_mock.__enter__.return_value = file_mock
-        file_mock.__exit__.return_value = None
+        file_mock.__enter__ = Mock(return_value=file_mock)
+        file_mock.__exit__ = Mock(return_value=None)
         return file_mock
 
 

@@ -26,6 +26,9 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+def _str_or_empty(v: Any) -> str:
+    return v if isinstance(v, str) else ""
+
 class SnapshotParams(TypedDict, total=False):
     negative_prompt: str
     seed: int
@@ -81,27 +84,6 @@ class TelegramBot:
         except Exception:
             pass
         self.waiting_for_negative_prompt: Set[str] = set()
-
-    async def _progress_updater(self, progress_msg: Message, task_id: str, prompt: str, generation_params: Dict[str, Any], reply_markup: InlineKeyboardMarkup) -> None:
-        """进度更新协程"""
-        try:
-            while True:
-                _progress, eta = await self.sd_controller.get_progress()
-                try:
-                    eta_text = TextContent.ETA_TEXT.format(eta=eta) if eta > 0 else ""
-                    await progress_msg.edit_text(
-                        TextContent.GENERATE_PROGRESS.format(
-                            task_id=task_id,
-                            prompt=prompt[:50] + ('...' if len(prompt) > 50 else ''),
-                            resolution=f"{generation_params['width']}x{generation_params['height']}"
-                        ) + ("\n" + eta_text if eta_text else ""),
-                        reply_markup=reply_markup
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(2)
-        except Exception:
-            pass
 
     # 下面的代码只做流程分发，具体逻辑交给 manager/controller
     def create_main_menu(self) -> InlineKeyboardMarkup:
@@ -159,10 +141,17 @@ class TelegramBot:
                 await self.sd_controller.save_result_locally(result)
             self.security.complete_task(task_id, "liked")
             if query.message is not None:
-                old_caption = (query.message.caption or "")
-                new_caption = old_caption + TextContent.LIKED_CAPTION_APPEND
+                base = _str_or_empty(query.message.caption) or _str_or_empty(query.message.text)
+                new_text = f"{base}{TextContent.LIKED_CAPTION_APPEND}"
+                has_media = bool(getattr(query.message, "photo", None) or
+                                getattr(query.message, "video", None) or
+                                getattr(query.message, "document", None))
+
                 try:
-                    await query.edit_message_caption(new_caption, reply_markup=None)
+                    if has_media or isinstance(query.message.caption, str):
+                        await query.edit_message_caption(new_text, reply_markup=None)
+                    else:
+                        await query.edit_message_text(new_text, reply_markup=None)
                 except Exception:
                     pass
         elif data.startswith(CallbackData.ENHANCE_HR.value.split("{")[0]):
@@ -733,11 +722,6 @@ class TelegramBot:
             reply_markup=reply_markup
         )
         
-        # 启动进度更新任务
-        updater_task = asyncio.create_task(self._progress_updater(
-            progress_msg, task_id, prompt, generation_params, reply_markup
-        ))
-
         # 调用SD API生成图片，使用生成参数
         # 将 negative_prompt 单独取出以满足类型检查
         neg_prompt_any = generation_params.get('negative_prompt')
@@ -823,12 +807,6 @@ class TelegramBot:
                 except Exception:
                     pass
 
-            # 结束进度刷新
-            try:
-                updater_task.cancel()
-                await updater_task
-            except Exception:
-                pass
             # 清理进度消息
             try:
                 await progress_msg.delete()
@@ -840,12 +818,6 @@ class TelegramBot:
             self.security.complete_task(task_id, "success")
             
         else:
-            # 生成失败
-            try:
-                updater_task.cancel()
-                await updater_task
-            except Exception:
-                pass
             await progress_msg.edit_text(TextContent.GENERATE_FAIL.format(error=result, prompt=prompt[:50]))
             
             # 记录失败日志

@@ -29,4 +29,7 @@ data/
 # 用户设置
 user_settings.json
 
-# 系统
+# 测试报告
+.coverage
+coverage.xml
+reports/

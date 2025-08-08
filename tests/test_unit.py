@@ -352,7 +352,7 @@ class TestFormManager(unittest.TestCase):
         self.assertFalse(self.form_manager.is_waiting_for_input(user_id))
 
 
-class TestSDController(unittest.TestCase):
+class TestSDController(unittest.IsolatedAsyncioTestCase):
     """测试Stable Diffusion控制器"""
     
     def setUp(self):
@@ -548,6 +548,7 @@ class TestRequireAuthDecorator(unittest.TestCase):
         mock_update = Mock()
         mock_update.effective_user = Mock()
         mock_update.effective_user.id = 999  # 未授权ID
+        mock_update.callback_query = None
         mock_update.message = Mock()
         mock_update.message.reply_text = AsyncMock()
         
@@ -561,7 +562,7 @@ class TestRequireAuthDecorator(unittest.TestCase):
                 test_method(mock_self, mock_update, mock_context)
             )
             # 应该调用reply_text发送未授权消息
-            mock_update.message.reply_text.assert_called_with("❌ 未授权访问")
+            mock_update.message.reply_text.assert_awaited_once_with("❌ 未授权访问")
         finally:
             loop.close()
 

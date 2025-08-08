@@ -18,7 +18,7 @@ from sd_controller import StableDiffusionController
 
 
 @pytest.mark.integration
-class TestBotIntegration:
+class TestBotIntegration():
     """Bot集成测试"""
     
     @pytest.fixture
@@ -63,7 +63,7 @@ class TestBotIntegration:
         # 验证回复消息被调用
         mock_update.message.reply_text.assert_called_once()
         call_args = mock_update.message.reply_text.call_args
-        self.assertIn("TestUser", call_args[0][0])
+        assert "TestUser" in call_args[0][0]
     
     @pytest.mark.asyncio
     async def test_start_command_unauthorized_user(self, bot_instance):
@@ -82,7 +82,7 @@ class TestBotIntegration:
         # 验证发送了未授权消息
         mock_update.message.reply_text.assert_called_once()
         call_args = mock_update.message.reply_text.call_args
-        self.assertIn("未被授权", call_args[0][0])
+        assert "未被授权" in call_args[0][0]
     
     @pytest.mark.asyncio
     async def test_text_prompt_handling(self, bot_instance):
@@ -384,32 +384,32 @@ class TestSDControllerIntegration:
 class TestPerformance:
     """性能测试"""
     
+    @pytest.mark.skip(reason="太慢了，也不需要性能测试")
     def test_user_manager_performance(self):
         """测试用户管理器性能"""
-        assert False, "Skip test_user_manager_performance"
-        #import time
+        import time
         
-        #with tempfile.TemporaryDirectory() as temp_dir:
-        #    with patch.object(Config, 'DATA_DIR', temp_dir):
-        #        user_manager = UserManager(Config.SD_DEFAULT_PARAMS)
-        #        
-        #        # 测试大量用户设置的性能
-        #        start_time = time.time()
-        #        
-        #        for i in range(1000):
-        #            user_id = f"user_{i}"
-        #            user_manager.set_resolution(user_id, 512, 512)
-        #            user_manager.set_negative_prompt(user_id, f"negative_{i}")
-        #        
-        #        end_time = time.time()
-        #        
-        #        # 验证性能在合理范围内（1000个用户操作应该在1秒内完成）
-        #        assert end_time - start_time < 1.0
-        #        
-        #        # 验证数据正确性
-        #        settings = user_manager.get_settings("user_500")
-        #        assert settings['width'] == 512
-        #        assert settings['negative_prompt'] == "negative_500"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(Config, 'DATA_DIR', temp_dir):
+                user_manager = UserManager(Config.SD_DEFAULT_PARAMS)
+                
+                # 测试大量用户设置的性能
+                start_time = time.time()
+                
+                for i in range(1000):
+                    user_id = f"user_{i}"
+                    user_manager.set_resolution(user_id, 512, 512)
+                    user_manager.set_negative_prompt(user_id, f"negative_{i}")
+                
+                end_time = time.time()
+                
+                # 验证性能在合理范围内（1000个用户操作应该在1秒内完成）
+                assert end_time - start_time < 1.0
+                
+                # 验证数据正确性
+                settings = user_manager.get_settings("user_500")
+                assert settings['width'] == 512
+                assert settings['negative_prompt'] == "negative_500"
     
     def test_security_manager_performance(self):
         """测试安全管理器性能"""
