@@ -18,7 +18,6 @@ from text_content import TextContent
 import asyncio
 import json
 import os
-import re
 
 
 logging.basicConfig(
@@ -42,7 +41,7 @@ class TaskSnapshot(TypedDict):
     params: SnapshotParams
 
 class TelegramBot:
-    application: Optional[Any]
+    application: Optional[Application]  # type: ignore[type-arg]
     last_prompt: Optional[str]
     user_last_photo_msg: Dict[str, int]
     security: SecurityManager
@@ -83,6 +82,27 @@ class TelegramBot:
         except Exception:
             pass
         self.waiting_for_negative_prompt: Set[str] = set()
+
+    async def _progress_updater(self, progress_msg: Message, task_id: str, prompt: str, generation_params: Dict[str, Any], reply_markup: InlineKeyboardMarkup) -> None:
+        """进度更新协程"""
+        try:
+            while True:
+                _progress, eta = await self.sd_controller.get_progress()
+                try:
+                    eta_text = TextContent.ETA_TEXT.format(eta=eta) if eta > 0 else ""
+                    await progress_msg.edit_text(
+                        TextContent.GENERATE_PROGRESS.format(
+                            task_id=task_id,
+                            prompt=prompt[:50] + ('...' if len(prompt) > 50 else ''),
+                            resolution=f"{generation_params['width']}x{generation_params['height']}"
+                        ) + ("\n" + eta_text if eta_text else ""),
+                        reply_markup=reply_markup
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
+        except Exception:
+            pass
 
     # 下面的代码只做流程分发，具体逻辑交给 manager/controller
     def create_main_menu(self) -> InlineKeyboardMarkup:
@@ -500,7 +520,6 @@ class TelegramBot:
 
     async def generate_from_form(self, query: CallbackQuery, user_id: str) -> None:
         """从表单生成图片"""
-        form_data = self.form_manager.get_user_form(user_id)
         username = query.from_user.username or query.from_user.first_name
         
         # 获取提示词
@@ -568,7 +587,8 @@ class TelegramBot:
         
         if update.message is None:
             return
-        await cast(Message, update.message).reply_text(
+        assert update.message is not None
+        await update.message.reply_text(
             text,
             reply_markup=Keyboards.advanced_form_menu(cast(Dict[str, object], form_data))
         )
@@ -691,6 +711,11 @@ class TelegramBot:
         else:
             generation_params = dict(user_settings)
         
+        # 自动生成随机seed（除非用户已指定）
+        if 'seed' not in generation_params or generation_params['seed'] is None:
+            import random
+            generation_params['seed'] = random.randint(1, 2147483647)  # 32位有符号整数范围
+        
         # 添加到安全管理器
         self.security.add_task(task_id, user_id, prompt)
         self.security.add_generation_record(user_id)
@@ -709,29 +734,10 @@ class TelegramBot:
             reply_markup=reply_markup
         )
         
-        # 启动一个后台协程定期刷新进度
-        progress_running = True
-        async def progress_updater():
-            try:
-                while progress_running:
-                    progress, eta = await self.sd_controller.get_progress()
-                    try:
-                        eta_text = TextContent.ETA_TEXT.format(eta=eta) if eta > 0 else ""
-                        await progress_msg.edit_text(
-                            TextContent.GENERATE_PROGRESS.format(
-                                task_id=task_id,
-                                prompt=prompt[:50] + ('...' if len(prompt) > 50 else ''),
-                                resolution=f"{generation_params['width']}x{generation_params['height']}"
-                            ) + ("\n" + eta_text if eta_text else ""),
-                            reply_markup=reply_markup
-                        )
-                    except Exception:
-                        pass
-                    await asyncio.sleep(2)
-            except Exception:
-                pass
-
-        updater_task = asyncio.create_task(progress_updater())
+        # 启动进度更新任务
+        updater_task = asyncio.create_task(self._progress_updater(
+            progress_msg, task_id, prompt, generation_params, reply_markup
+        ))
 
         # 调用SD API生成图片，使用生成参数
         # 将 negative_prompt 单独取出以满足类型检查
@@ -753,8 +759,8 @@ class TelegramBot:
             # 构建标题，如果是表单生成则显示更多信息
             if from_form:
                 form_data = self.form_manager.get_user_form(user_id)
-                seed_info = f"🎲 种子: {generation_params.get('seed', '随机')}"
-                hires_info = f"🔍 高清修复: {'开启' if form_data.get('hires_fix') else '关闭'}"
+                seed_info = f"🎲 种子: {generation_params['seed']}"
+                hires_info = f"🔍 高清修复: {'开启' if bool(form_data.get('hires_fix')) else '关闭'}"
                 caption = TextContent.GENERATE_CAPTION.format(
                     prompt=prompt,
                     resolution=f"{generation_params['width']}x{generation_params['height']}"
@@ -769,33 +775,6 @@ class TelegramBot:
             # 记录任务结果
             self.task_results[task_id] = api_result
             self.task_params[task_id] = generation_params
-            # 从返回的 info 中尽力解析 seed（若本次未显式指定）
-            if 'seed' not in generation_params:
-                try:
-                    raw_info = api_result.get('info')
-                    seed_val = None
-                    if isinstance(raw_info, str) and raw_info.strip():
-                        try:
-                            info_obj = json.loads(raw_info)
-                            if isinstance(info_obj, dict):
-                                seeds = info_obj.get('all_seeds')
-                                if isinstance(seeds, list) and len(seeds) > 0:
-                                    seed_val = int(seeds[0])
-                                elif 'seed' in info_obj and info_obj['seed'] is not None:
-                                    seed_val = int(info_obj['seed'])
-                                elif 'infotexts' in info_obj and info_obj['infotexts']:
-                                    text_meta = info_obj['infotexts'][0]
-                                    m = re.search(r"Seed:\s*(\d+)", text_meta)
-                                    if m:
-                                        seed_val = int(m.group(1))
-                        except Exception:
-                            m = re.search(r"Seed:\s*(\d+)", raw_info)
-                            if m:
-                                seed_val = int(m.group(1))
-                    if seed_val is not None:
-                        generation_params['seed'] = seed_val
-                except Exception:
-                    pass
             # 判断是否本次已启用高清修复
             is_hr_enabled = bool(generation_params.get('enable_hr'))
             reply_markup = Keyboards.like_keyboard(task_id, show_enhance=not is_hr_enabled)
@@ -809,34 +788,7 @@ class TelegramBot:
 
             # 快照：仅保存对 SD 生成有用的参数（可复用）
             base_keys = ['negative_prompt', 'seed', 'width', 'height', 'steps', 'cfg_scale', 'sampler_name']
-            # 确保 seed 存在：若用户没显式设置，尝试从 api_result 中解析
             params_snapshot = {k: generation_params[k] for k in base_keys if k in generation_params}
-            if 'seed' not in params_snapshot:
-                try:
-                    raw_info = api_result.get('info')
-                    seed_val = None
-                    if isinstance(raw_info, str) and raw_info.strip():
-                        try:
-                            info_obj = json.loads(raw_info)
-                            if isinstance(info_obj, dict):
-                                seeds = info_obj.get('all_seeds')
-                                if isinstance(seeds, list) and len(seeds) > 0:
-                                    seed_val = int(seeds[0])
-                                elif 'seed' in info_obj and info_obj['seed'] is not None:
-                                    seed_val = int(info_obj['seed'])
-                                elif 'infotexts' in info_obj and info_obj['infotexts']:
-                                    text_meta = info_obj['infotexts'][0]
-                                    m = re.search(r"Seed:\s*(\d+)", text_meta)
-                                    if m:
-                                        seed_val = int(m.group(1))
-                        except Exception:
-                            m = re.search(r"Seed:\s*(\d+)", raw_info)
-                            if m:
-                                seed_val = int(m.group(1))
-                    if seed_val is not None:
-                        params_snapshot['seed'] = seed_val
-                except Exception:
-                    pass
             params_snapshot_t: SnapshotParams = cast(SnapshotParams, params_snapshot)
             self.task_snapshots[task_id] = {
                 'prompt': prompt,
@@ -860,20 +812,21 @@ class TelegramBot:
             chat_id = message.chat_id
             dq = self.user_recent_photo_msgs.setdefault(user_id, deque())
             dq.append((chat_id, sent_msg.message_id))
-            if len(dq) > Config.LIKABLE_MESSAGE_LIMIT and self.application is not None:
+            if len(dq) > Config.LIKABLE_MESSAGE_LIMIT and self.application is not None:  # type: ignore[reportUnknownMemberType]
                 old_chat_id, old_msg_id = dq.popleft()
                 try:
-                    await self.application.bot.edit_message_reply_markup(
-                        chat_id=old_chat_id,
-                        message_id=old_msg_id,
-                        reply_markup=None
-                    )
+                    if self.application.bot is not None:  # type: ignore[attr-defined]
+                        await self.application.bot.edit_message_reply_markup(  # type: ignore[attr-defined]
+                            chat_id=old_chat_id,
+                            message_id=old_msg_id,
+                            reply_markup=None
+                        )
                 except Exception:
                     pass
 
             # 结束进度刷新
-            progress_running = False
             try:
+                updater_task.cancel()
                 await updater_task
             except Exception:
                 pass
@@ -889,8 +842,8 @@ class TelegramBot:
             
         else:
             # 生成失败
-            progress_running = False
             try:
+                updater_task.cancel()
                 await updater_task
             except Exception:
                 pass
@@ -903,7 +856,8 @@ class TelegramBot:
     @require_auth
     async def regenerate_image_with_last_prompt_task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """重新生成上一个提示词的图片"""
-        prompt = self.last_prompt
+        if update.effective_user is None or update.message is None:
+            return
         user_id: str = str(update.effective_user.id)
         username = update.effective_user.username or update.effective_user.first_name
         if self.last_prompt is not None:
@@ -930,9 +884,6 @@ class TelegramBot:
 
         # 从快照参数出发，避免被用户此后改动影响
         generation_params_dict: Dict[str, Any] = dict(snapshot['params'])
-        # 确保复用 seed
-        if 'seed' in snapshot['params']:
-            generation_params_dict['seed'] = snapshot['params']['seed']
         # 强制高清修复（不依赖表单状态）
         h = Config.HIRES_DEFAULTS
         generation_params_dict['enable_hr'] = True
@@ -950,7 +901,8 @@ class TelegramBot:
             await query.edit_message_text("✨ 正在对图片进行高清化...")
         except Exception:
             # 可能因为原消息是图片没有文本，无法 edit_text，退化为发送一条新进度消息
-            await query.message.reply_text("✨ 正在对图片进行高清化...")
+            if query.message is not None:
+                await query.message.reply_text("✨ 正在对图片进行高清化...")
 
         # 直接发起新任务（使用当前消息作为 message 容器），并覆盖参数为快照参数 + 强制高清修复
         await self.generate_image_task(
@@ -964,7 +916,8 @@ class TelegramBot:
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """帮助命令"""
-        await update.message.reply_text(TextContent.HELP)
+        if update.message is not None:
+            await update.message.reply_text(TextContent.HELP)
     
     def run(self) -> None:
         """运行机器人"""
@@ -976,15 +929,15 @@ class TelegramBot:
             logger.error("请在 .env 文件中设置 AUTHORIZED_USERS")
             return
         
-        self.application = Application.builder().token(Config.BOT_TOKEN).build()
+        self.application = Application.builder().token(Config.BOT_TOKEN).build()  # type: ignore[assignment]
         
         # 添加处理器
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("re", self.regenerate_image_with_last_prompt_task))
-        self.application.add_handler(CommandHandler("help", self.help_command))
-        self.application.add_handler(CallbackQueryHandler(self.handle_callback))
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_prompt))
+        self.application.add_handler(CommandHandler("start", self.start))  # type: ignore[arg-type]
+        self.application.add_handler(CommandHandler("re", self.regenerate_image_with_last_prompt_task))  # type: ignore[arg-type]
+        self.application.add_handler(CommandHandler("help", self.help_command))  # type: ignore[arg-type]
+        self.application.add_handler(CallbackQueryHandler(self.handle_callback))  # type: ignore[arg-type]
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_prompt))  # type: ignore[arg-type]
         
         logger.info("Stable Diffusion 控制机器人启动中...")
         logger.info(f"SD WebUI API: {Config.SD_API_URL}")
-        self.application.run_polling()
+        self.application.run_polling()  # type: ignore[attr-defined]

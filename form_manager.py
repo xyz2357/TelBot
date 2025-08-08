@@ -51,7 +51,7 @@ class FormManager:
             prompt_display = prompt_display[:30] + "..."
             
         resolution_display = form_data.get('resolution') or "未设置 (使用默认)"
-        seed_display = str(form_data.get('seed')) if form_data.get('seed') is not None else "随机"
+        seed_display = str(form_data.get('seed')) if form_data.get('seed') is not None else "自动随机"
         hires_display = "开启" if form_data.get('hires_fix') else "关闭"
         
         return {
@@ -93,12 +93,9 @@ class FormManager:
             except ValueError:
                 pass  # 使用默认分辨率
         
-        # 处理种子
+        # 处理种子（如果用户指定了则使用，否则让bot.py统一处理）
         if form_data.get('seed') is not None:
             params['seed'] = form_data['seed']
-        else:
-            # 生成随机种子
-            params['seed'] = random.randint(0, 4294967295)
         
         # 高清修复参数映射
         if form_data.get('hires_fix'):

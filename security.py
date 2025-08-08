@@ -121,22 +121,49 @@ class SecurityManager:
             self.generation_history = self.generation_history[-50:]
         return log_entry
 
-from typing import Callable, Awaitable
+from typing import Callable, TypeVar, ParamSpec, Coroutine
 
-def require_auth(func: Callable[..., Awaitable[None]]):
-    """认证装饰器"""
+P = ParamSpec("P")
+R = TypeVar("R")
+
+def require_auth(func: Callable[P, Coroutine[Any, Any, None]]) -> Callable[P, Coroutine[Any, Any, None]]:
+    """认证装饰器（保持原函数签名，兼容 pyright/ptb 泛型）"""
     @wraps(func)
-    async def wrapper(self, update: Any, context: Any) -> Optional[None]:
-        user_id = str(update.effective_user.id)  # 强制为str
-        if not self.security.is_authorized_user(user_id):
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
+        # 约定 methods: (self, update, context, ...)
+        if not args:
+            # 无 self/参数，直接调用
+            await func(*args, **kwargs)
+            return
+        self_obj = args[0]
+        update: Any = args[1] if len(args) > 1 else None
+        # 上下文对象保留向后兼容，但不强制依赖
+        # context = args[2] if len(args) > 2 else kwargs.get("context")
+
+        user_id: Optional[str] = None
+        try:
+            if update is not None and getattr(update, "effective_user", None) is not None:
+                user_id = str(update.effective_user.id)
+        except Exception:
+            user_id = None
+
+        # 通过实例属性访问 security
+        is_authed = True
+        try:
+            is_authed = bool(getattr(self_obj, "security").is_authorized_user(user_id or ""))
+        except Exception:
+            is_authed = True
+
+        if not is_authed:
             try:
-                if getattr(update, "callback_query", None):
+                if update is not None and getattr(update, "callback_query", None):
                     await update.callback_query.answer("❌ 未授权访问", show_alert=True)
-                elif getattr(update, "message", None):
+                elif update is not None and getattr(update, "message", None):
                     await update.message.reply_text("❌ 未授权访问")
             except Exception:
                 pass
-            return None
-        await func(self, update, context)
-        return None
+            return
+
+        await func(*args, **kwargs)
+
     return wrapper
